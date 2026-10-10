@@ -354,3 +354,21 @@ describe("chord-ratio seeding construction", () => {
     }
   });
 });
+
+describe("boundary with no apex vertices", () => {
+  test("nesting sites and placement return null instead of hanging", () => {
+    const g = new WeaveGraph();
+    const { apexVerts } = g.seedHexagon();
+    // Give every apex a second face so the whole boundary is nesting vertices.
+    for (const a of apexVerts) {
+      g._addTriangleFace([a, g._addVertex(), g._addVertex()]);
+    }
+    assert.ok(g.boundary.every((v) => g.vertexKind(v) === "nesting"));
+
+    assert.deepEqual(g.concaveVertices(), []);
+    for (const v of g.boundary) {
+      assert.equal(g.nestingSiteAt(v), null);
+      assert.equal(g.placePolygon(v, 6), null);
+    }
+  });
+});

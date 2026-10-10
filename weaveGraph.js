@@ -158,6 +158,9 @@ export class WeaveGraph {
   }
 
   concaveVertices() {
+    // With no apex anywhere on the boundary there are no flanking apexes,
+    // so no nesting site can be formed and nothing is placeable.
+    if (!this.boundary.some((v) => this.vertexKind(v) === "apex")) return [];
     return this.boundary.filter((v) => this.vertexKind(v) === "nesting");
   }
 
@@ -173,15 +176,18 @@ export class WeaveGraph {
   // Find the maximal run of consecutive nesting-vertices in the boundary
   // loop containing `v` (a "nesting site"), plus its two flanking apexes.
   // Returns { apexLeft, siteVerts: [s1..sk], apexRight } or null if `v`
-  // isn't currently a nesting vertex.
+  // isn't currently a nesting vertex, or if the boundary has no apex at all
+  // (every boundary vertex is a nesting vertex, so there are no flanks).
   nestingSiteAt(v) {
     if (this.vertexKind(v) !== "nesting") return null;
     const len = this.boundary.length;
     const idx = this.boundary.indexOf(v);
 
     let lo = idx;
+    let steps = 0;
     while (this.vertexKind(this.boundary[(lo - 1 + len) % len]) === "nesting") {
       lo = (lo - 1 + len) % len;
+      if (++steps >= len) return null; // wrapped around: no apex anywhere
     }
     let hi = idx;
     while (this.vertexKind(this.boundary[(hi + 1) % len]) === "nesting") {
