@@ -287,7 +287,7 @@ export class WeaveGraph {
   // collinear through the vertex for the mesh to be locally flat there -
   // including at the boundary, where "this vertex isn't a kink" is just as
   // meaningful even though one of its four angular sectors is still open.
-  // Returns: [{ v, neighbors: [n0,n1,n2,n3] }, ...]
+  // Returns: [{ v, neighbors: [n0,n1,n2,n3], firstSectorIsPolygon }, ...]
   degree4VertexNeighbors() {
     const result = [];
     for (const [v, faceKeys] of this._facesAt) {
@@ -310,7 +310,7 @@ export class WeaveGraph {
         if (iv === -1) continue;
         const na = verts[(iv - 1 + n) % n];
         const nb = verts[(iv + 1) % n];
-        faceNeighborPairs.push([na, nb]);
+        faceNeighborPairs.push([na, nb, isPoly]);
       }
       if (faceNeighborPairs.length !== faceCount) continue;
 
@@ -372,7 +372,15 @@ export class WeaveGraph {
         if (!found) break;
       }
       if (neighbors.length === 4 && new Set(neighbors).size === 4) {
-        result.push({ v, neighbors });
+        // The sector between neighbors[0] and neighbors[1] is always backed
+        // by a face (an open chain's gap is between neighbors[3] and
+        // neighbors[0]); report whether it is a polygon or a weave triangle,
+        // looked up by face class, never by vertex count (a 3-gon polygon
+        // is still a polygon). Strips use this for the over/under rule.
+        const first = faceNeighborPairs.find(
+          ([na, nb]) => (na === neighbors[0] && nb === neighbors[1]) || (na === neighbors[1] && nb === neighbors[0]),
+        );
+        result.push({ v, neighbors, firstSectorIsPolygon: first ? first[2] : null });
       }
     }
     return result;

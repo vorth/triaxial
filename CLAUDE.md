@@ -90,6 +90,27 @@ equilateral triangle's height (`√3/2`), total `√3`. A hardcoded guess
 triangle's three edges; this is the kind of "looks plausible, isn't derived"
 constant to be suspicious of elsewhere in the seed/layout code.
 
+### Known bug: fuse with two apexes left can create a triangle-triangle edge
+
+If the boundary has exactly two apexes and the nesting site on the far side
+of them is a single vertex `s`, a fuse placement merges the two apex
+triangles, which both already contain `s` — they end up sharing an edge, and
+the boundary collapses to 2 vertices. Not yet fixed; `strips.test.js` has an
+`assertWellFormed` guard for this.
+
+## Woven strips (strips.js)
+
+Strips are read off the weave graph, never stored in it: a strip goes
+straight through each degree-4 vertex (opposite neighbors in the
+`degree4VertexNeighbors()` ring) and ends only at apexes. Over/under is one
+global bit `sigma` plus a local Tait-sign rule per crossing (uses
+`firstSectorIsPolygon`), so it never conflicts and needs no orientability.
+Three layers, kept separate so the future XPBD solver can replace the middle
+one: `StripModel` (topology: node chains, crossings as contact pairs with
+fixed over/under; rebuilt on graph edits), `StripState` (per-node position +
+director in Float32Arrays; currently derived each frame from physics
+positions), and the render-only ribbon mesh. Run `npm test` after changes.
+
 ## Physics model (physics.js)
 
 One `forces` accumulator per frame; every term below just adds into it

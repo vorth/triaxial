@@ -2,6 +2,14 @@ import * as THREE from "three";
 import { TrackballControls } from "three/addons/controls/TrackballControls.js";
 import { WeaveGraph } from "./weaveGraph.js";
 import { Physics, DEFAULT_PARAMS } from "./physics.js";
+import {
+  DEFAULT_STRIP_PARAMS,
+  buildStripModel,
+  createStripState,
+  deriveStripState,
+  createRibbonLayout,
+  writeRibbonMesh,
+} from "./strips.js";
 
 // ---------------------------------------------------------------------------
 // Scene setup
@@ -75,15 +83,68 @@ function seed() {
 }
 seed();
 
+// ---------------------------------------------------------------------------
+// Woven strips, derived from the graph (see strips.js). The model is rebuilt
+// only on topology changes; its node state is re-derived from the physics
+// positions every frame, and the ribbon mesh is written from that state.
+// ---------------------------------------------------------------------------
+
+const STRIP_STORAGE_KEY = "weaveGraph.stripParams";
+const stripParams = { ...DEFAULT_STRIP_PARAMS };
+try {
+  const raw = JSON.parse(localStorage.getItem(STRIP_STORAGE_KEY) || "{}");
+  for (const key of ["width", "thickness"]) {
+    if (typeof raw[key] === "number" && Number.isFinite(raw[key])) stripParams[key] = raw[key];
+  }
+} catch {
+  // ignore - defaults are fine
+}
+
+let stripModel = null;
+let stripState = null;
+let ribbonLayout = null;
+const ribbonMaterial = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.55,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+});
+const ribbonMesh = new THREE.Mesh(new THREE.BufferGeometry(), ribbonMaterial);
+ribbonMesh.frustumCulled = false; // vertices move every frame; bounds go stale
+scene.add(ribbonMesh);
+
+function rebuildStrips() {
+  stripModel = buildStripModel(graph, stripModel, stripParams.samplesPerEdge);
+  stripState = createStripState(stripModel);
+  ribbonLayout = createRibbonLayout(stripModel);
+  const geo = new THREE.BufferGeometry();
+  const position = new THREE.BufferAttribute(new Float32Array(3 * ribbonLayout.vertexCount), 3);
+  const normal = new THREE.BufferAttribute(new Float32Array(3 * ribbonLayout.vertexCount), 3);
+  position.setUsage(THREE.DynamicDrawUsage);
+  normal.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute("position", position);
+  geo.setAttribute("normal", normal);
+  geo.setAttribute("color", new THREE.BufferAttribute(ribbonLayout.color, 3));
+  geo.setIndex(new THREE.BufferAttribute(ribbonLayout.index, 1));
+  ribbonMesh.geometry.dispose();
+  ribbonMesh.geometry = geo;
+}
+rebuildStrips();
+
+function updateStrips() {
+  deriveStripState(stripModel, physics.positions, stripParams, stripState);
+  const geo = ribbonMesh.geometry;
+  writeRibbonMesh(stripModel, ribbonLayout, stripState, stripParams, geo.attributes.position.array, geo.attributes.normal.array);
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.normal.needsUpdate = true;
+}
+
 let currentMode = { type: "place", n: 6 };
 
 // ---------------------------------------------------------------------------
-// Rendering: lines for edges, spheres for concave (placement-target) vertices
+// Rendering: spheres for concave (placement-target) vertices; the graph
+// itself is shown only through the woven strips
 // ---------------------------------------------------------------------------
-
-const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x8fa3c8, linewidth: 1 });
-let edgeLines = new THREE.LineSegments(new THREE.BufferGeometry(), edgeMaterial);
-scene.add(edgeLines);
 
 const targetGeometry = new THREE.SphereGeometry(0.09, 16, 12);
 const targetMaterial = new THREE.MeshStandardMaterial({ color: 0x4c8dff, emissive: 0x1a3a6b, roughness: 0.4 });
@@ -118,29 +179,12 @@ function rebuildTargets() {
 rebuildTargets();
 
 function updateRenderGeometry() {
-  const edges = graph.edges();
-  const positions = new Float32Array(edges.length * 2 * 3);
-  let i = 0;
-  for (const [a, b] of edges) {
-    const pa = physics.positions.get(a);
-    const pb = physics.positions.get(b);
-    if (!pa || !pb) continue;
-    positions[i++] = pa.x;
-    positions[i++] = pa.y;
-    positions[i++] = pa.z;
-    positions[i++] = pb.x;
-    positions[i++] = pb.y;
-    positions[i++] = pb.z;
-  }
-  edgeLines.geometry.dispose();
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(positions.subarray(0, i), 3));
-  edgeLines.geometry = geo;
-
   for (const [v, mesh] of targetMeshes) {
     const p = physics.positions.get(v);
     if (p) mesh.position.set(p.x, p.y, p.z);
   }
+
+  updateStrips();
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +218,11 @@ for (const btn of polygonGroup.querySelectorAll(".mode-btn[data-n]")) {
   btn.addEventListener("click", () => setModePlace(parseInt(btn.dataset.n, 10)));
 }
 deleteBtn.addEventListener("click", setModeDelete);
+
+const flipBtn = document.getElementById("flip-weave");
+flipBtn.addEventListener("click", () => {
+  stripModel.sigma = -stripModel.sigma;
+});
 
 // ---------------------------------------------------------------------------
 // Interaction: raycast against target spheres on click/tap
@@ -220,6 +269,7 @@ function handleTargetClick(vertexId) {
     physics.pruneTo(new Set(graph.vertices.keys()));
   }
   rebuildTargets();
+  rebuildStrips();
 }
 
 renderer.domElement.addEventListener("pointerdown", onPointerDown);
@@ -288,12 +338,39 @@ for (const key of sliderIds) {
   });
 }
 
+// strip geometry sliders (render-only for now; not physics params)
+const stripSliderIds = ["width", "thickness"];
+function setStripSliderDisplay(key) {
+  document.getElementById("strip-" + key).value = stripParams[key];
+  document.querySelector(`.val[data-val="strip-${key}"]`).textContent = stripParams[key].toFixed(2);
+}
+function saveStripParams() {
+  try {
+    localStorage.setItem(STRIP_STORAGE_KEY, JSON.stringify({ width: stripParams.width, thickness: stripParams.thickness }));
+  } catch {
+    // ignore
+  }
+}
+for (const key of stripSliderIds) {
+  setStripSliderDisplay(key);
+  document.getElementById("strip-" + key).addEventListener("input", (e) => {
+    stripParams[key] = parseFloat(e.target.value);
+    setStripSliderDisplay(key);
+    saveStripParams();
+  });
+}
+
 tuningReset.addEventListener("click", () => {
   for (const key of sliderIds) {
     physics[key] = DEFAULT_PARAMS[key];
     setSliderDisplay(key, DEFAULT_PARAMS[key]);
   }
   saveStoredParams();
+  for (const key of stripSliderIds) {
+    stripParams[key] = DEFAULT_STRIP_PARAMS[key];
+    setStripSliderDisplay(key);
+  }
+  saveStripParams();
 });
 
 // ---------------------------------------------------------------------------

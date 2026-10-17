@@ -187,6 +187,9 @@
     <div class="group">
       <button class="mode-btn delete-btn" id="delete-mode">Delete</button>
     </div>
+    <div class="group">
+      <button class="mode-btn" id="flip-weave">Flip over/under</button>
+    </div>
   </div>
 
   <div id="hint">Click a highlighted (concave) vertex to place a cell. Drag to rotate, scroll to zoom.</div>
@@ -244,6 +247,22 @@
         </label>
         <input type="range" id="damping" min="0" max="0.1" step="0.002" />
         <span class="desc">Velocity retained each frame (lower = settles faster).</span>
+      </div>
+      <div class="tuning-row">
+        <label>
+          <span>Strip Width</span>
+          <span class="val" data-val="strip-width"></span>
+        </label>
+        <input type="range" id="strip-width" min="0.02" max="0.8" step="0.01" />
+        <span class="desc">In-surface width of each woven strip (edge length = 1).</span>
+      </div>
+      <div class="tuning-row">
+        <label>
+          <span>Strip Thickness</span>
+          <span class="val" data-val="strip-thickness"></span>
+        </label>
+        <input type="range" id="strip-thickness" min="0.01" max="0.5" step="0.01" />
+        <span class="desc">Strip thickness; also the over/under separation at crossings.</span>
       </div>
       <button id="tuning-reset">Reset to defaults</button>
     </div>
