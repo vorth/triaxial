@@ -146,8 +146,8 @@ let currentMode = { type: "place", n: 6 };
 // itself is shown only through the woven strips
 // ---------------------------------------------------------------------------
 
-const targetGeometry = new THREE.SphereGeometry(0.09, 16, 12);
-const targetMaterial = new THREE.MeshStandardMaterial({ color: 0x4c8dff, emissive: 0x1a3a6b, roughness: 0.4 });
+const targetGeometry = new THREE.SphereGeometry(0.164, 16, 12);
+const targetMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.5, roughness: 0.4 });
 const targetMaterialHover = new THREE.MeshStandardMaterial({ color: 0xffd24c, emissive: 0x6b4a1a, roughness: 0.4 });
 const deleteTargetMaterial = new THREE.MeshStandardMaterial({ color: 0xff5c5c, emissive: 0x6b1a1a, roughness: 0.4 });
 
