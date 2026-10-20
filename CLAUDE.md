@@ -98,6 +98,14 @@ triangles, which both already contain `s` — they end up sharing an edge, and
 the boundary collapses to 2 vertices. Not yet fixed; `strips.test.js` has an
 `assertWellFormed` guard for this.
 
+### Known bug: placement on a single-apex boundary builds degenerate faces
+
+With exactly one apex left on a boundary, `nestingSiteAt` returns that apex
+as both `apexLeft` and `apexRight`, and `placePolygon` then creates a
+self-loop edge `(u,u)` and degenerate faces. The spec above says the only
+valid placement there is a single `k`-gon closing the boundary; that case is
+not implemented. `stripState.test.js`'s fuzz test stops at such sites.
+
 ## Woven strips (strips.js)
 
 Strips are read off the weave graph, never stored in it: a strip goes
@@ -110,6 +118,26 @@ one: `StripModel` (topology: node chains, crossings as contact pairs with
 fixed over/under; rebuilt on graph edits), `StripState` (per-node position +
 director in Float32Arrays; currently derived each frame from physics
 positions), and the render-only ribbon mesh. Run `npm test` after changes.
+
+**The app now runs on the XPBD strip solver** (`solver.js`), which owns all
+positions in the solver state (`stripState.js`: nodes at fixed material
+spacing, one width vector per segment with twist stiffness, crossing
+table `passS`). Graph
+vertices are located only through `crossingPosition()`; edits go through
+`reconcileStripState` (span-by-span carry-over). `physics.js` is no longer
+used by the app and is due for removal (step 4; `weaveGraph.test.js` still
+imports it). Spec, status and measured solver findings (high damping
+needed; why pentagons don't yet make domes) are in
+`triaxial-weave-solver-design.md` ("Agreed design for this app").
+
+### Strip frame terminology (use these terms)
+
+At any point on a strip's centerline: **X** is the width direction, **Z**
+the thickness direction, **Y** along the strip. **Curl** is bending around X
+(out of the flat strip's plane; the paper-like bend, allowed). **Swerve** is
+bending around Z (within the strip's own plane, like a road; never wanted).
+**Twist** is rotation around Y (slight twist allowed). Where two strips
+cross, their Z axes must align.
 
 ## Physics model (physics.js)
 

@@ -20,7 +20,11 @@ import {
   passSide,
   createRibbonLayout,
   writeRibbonMesh,
+  crossingPosition,
+  stripPointAt,
+  stripLength,
 } from "./strips.js";
+import { seedPlacementPositions } from "./seeding.js";
 
 // ---- shared helpers ---------------------------------------------------
 
@@ -303,12 +307,122 @@ describe("derived state and ribbon mesh", () => {
     closeGreedily(g, p);
     assertWellFormed(g);
     const { model, state } = build(g, p);
-    const layout = createRibbonLayout(model);
+    const layout = createRibbonLayout(model, state);
     const position = new Float32Array(3 * layout.vertexCount).fill(NaN);
     const normal = new Float32Array(3 * layout.vertexCount).fill(NaN);
     writeRibbonMesh(model, layout, state, DEFAULT_STRIP_PARAMS, position, normal);
     assert.ok(position.every(Number.isFinite));
     assert.ok(normal.every(Number.isFinite));
     assert.ok(layout.index.every((i) => i < layout.vertexCount));
+  });
+});
+
+describe("crossing table", () => {
+  function build(g, p) {
+    const model = buildStripModel(g);
+    const state = deriveStripState(model, p.positions, DEFAULT_STRIP_PARAMS, createStripState(model));
+    return { model, state };
+  }
+
+  function grownAndClosed() {
+    const { g, p } = seedFlat();
+    grow(g, p, 6, 8);
+    grow(g, p, 5, 6);
+    grow(g, p, 4, 5);
+    grow(g, p, 3, 4);
+    grow(g, p, 7, 3);
+    closeGreedily(g, p);
+    assertWellFormed(g);
+    return { g, p };
+  }
+
+  test("every crossing has a stable index and kind", () => {
+    const { g, p } = seedFlat();
+    grow(g, p, 6, 5);
+    const { model } = build(g, p);
+    const indices = [...model.crossings.values()].map((c) => c.index).sort((a, b) => a - b);
+    assert.deepEqual(
+      indices,
+      indices.map((_, i) => i),
+    );
+    for (const c of model.crossings.values()) {
+      const fc = g.faceCount(c.v);
+      assert.equal(c.kind, fc === 4 ? "interior" : fc === 1 ? "apex" : "nesting");
+    }
+  });
+
+  test("crossingPosition locates every graph vertex (open and closed strips)", () => {
+    for (const { g, p } of [
+      (() => {
+        const m = seedFlat();
+        grow(m.g, m.p, 6, 8);
+        grow(m.g, m.p, 5, 4);
+        return m;
+      })(),
+      grownAndClosed(),
+    ]) {
+      const { model, state } = build(g, p);
+      for (const v of g.vertices.keys()) {
+        const q = crossingPosition(model, state, v);
+        const pv = p.positions.get(v);
+        assert.ok(Math.hypot(q.x - pv.x, q.y - pv.y, q.z - pv.z) < 1e-5, `vertex ${v}`);
+      }
+    }
+  });
+
+  test("material coordinates: monotone along strips, passes within strip length", () => {
+    const { g, p } = grownAndClosed();
+    const { model, state } = build(g, p);
+    for (const s of model.strips) {
+      for (let k = 1; k < s.nodeCount; k++) {
+        assert.ok(state.arc[s.nodeOffset + k] > state.arc[s.nodeOffset + k - 1]);
+      }
+    }
+    for (const c of model.crossings.values()) {
+      c.passes.forEach((pass, k) => {
+        const sv = state.passS[2 * c.index + k];
+        assert.ok(sv >= 0 && sv <= stripLength(state, pass.strip));
+      });
+    }
+  });
+
+  test("stripPointAt hits nodes exactly and wraps on closed strips", () => {
+    const { g, p } = grownAndClosed();
+    const { model, state } = build(g, p);
+    const s = model.strips[0];
+    assert.ok(s.closed);
+    const len = stripLength(state, s.id);
+    for (const k of [0, 3, s.nodeCount - 1]) {
+      const sv = state.arc[s.nodeOffset + k];
+      const o = 3 * (s.nodeOffset + k);
+      for (const shift of [0, len, -len]) {
+        const q = stripPointAt(state, s.id, sv + shift);
+        assert.ok(Math.hypot(q[0] - state.position[o], q[1] - state.position[o + 1], q[2] - state.position[o + 2]) < 1e-4);
+      }
+    }
+  });
+
+  test("seeding from crossing positions matches seeding from graph positions", () => {
+    const { g, p } = seedFlat();
+    grow(g, p, 6, 6);
+    const { model, state } = build(g, p);
+    for (const v of g.concaveVertices().slice(0, 6)) {
+      const { apexLeft, siteVerts, apexRight } = g.nestingSiteAt(v);
+      const chain = [apexLeft, ...siteVerts, apexRight];
+      const fromGraph = seedPlacementPositions(
+        chain.map((id) => p.positions.get(id)),
+        2,
+        3,
+      );
+      const fromStrips = seedPlacementPositions(
+        chain.map((id) => crossingPosition(model, state, id)),
+        2,
+        3,
+      );
+      [...fromGraph.mid, ...fromGraph.apex].forEach((a, i) => {
+        const b = [...fromStrips.mid, ...fromStrips.apex][i];
+        assert.ok(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) < 1e-4);
+      });
+    }
   });
 });

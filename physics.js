@@ -10,6 +10,8 @@
 // are kept in a Float32Array-backed map keyed by vertex id so the caller can
 // feed them straight into a THREE.BufferGeometry.
 
+import { seedPlacementPositions } from "./seeding.js";
+
 const REST_LENGTH = 1.0;
 const MAX_STRAIN = 0.1; // +-10%
 const MIN_LEN = REST_LENGTH * (1 - MAX_STRAIN);
@@ -95,124 +97,23 @@ export class Physics {
     );
   }
 
-  // Seed the fresh vertices created by placing an N-gon at a nesting site,
-  // using the chord-ratio construction: given 3 consecutive polygon
-  // vertices (A, B, C), the next vertex D satisfies D = A + R(n)*(C - B),
-  // i.e. chord A->D is parallel to chord B->C, scaled by a fixed ratio
-  // R(n) that depends only on the polygon's side count (R=1 for squares,
-  // the golden ratio for pentagons, 2 for hexagons, etc. -
-  // R(n) = sin(3*pi/n)/sin(pi/n) in closed form, verified against a true
-  // regular n-gon's diagonal/edge ratio). Sliding the window
-  // (A,B,C)->(B,C,D) and repeating generates the rest.
-  //
-  // `existingChain` is [u, ...siteVerts, w] - the nesting site's flanking
-  // apexes plus all of its existing boundary vertices, in polygon-loop
-  // order, exactly as WeaveGraph.placePolygon used them. These are real,
-  // already-placed mesh points, so the angles between them are whatever
-  // the existing mesh already has - not necessarily the new polygon's own
-  // ideal interior angle. This construction only guarantees each new chord
-  // is parallel to the one two-steps-back and scaled by R(n); the result
-  // is "affine regular" (same parallel-chord structure as a true regular
-  // n-gon, but sheared by the real starting angles), not an exact regular
-  // polygon. That's fine as a seed: physics relaxation (angle-regularity +
-  // planarity terms) takes it the rest of the way once released.
-  //
-  // midVerts are the fresh vertices to fill in after existingChain (may be
-  // empty - the join-edge and fuse placement cases never need any).
-  // apexVerts are the fresh triangle apexes, one per edge of the chain
-  // [w, ...midVerts, u] (also may be a single entry for the join-edge case,
-  // which bridges w->u directly).
+  // Seed the fresh vertices created by placing an N-gon at a nesting site
+  // (chord-ratio construction - see seeding.js). `existingChain` is
+  // [u, ...siteVerts, w] as WeaveGraph.placePolygon used them; midVerts and
+  // apexVerts are the fresh ids to position. Vertices that already have a
+  // position are left alone.
   seedPlacement(existingChain, midVerts, apexVerts) {
     const knownPts = existingChain.map((id) => this.positions.get(id));
     if (knownPts.some((p) => !p)) {
       for (const id of [...midVerts, ...apexVerts]) this.seedNear(id, existingChain);
       return;
     }
-
-    const n = existingChain.length + midVerts.length; // total sides of the new polygon
-    const ratio = n === 3 ? 0 : Math.sin((3 * Math.PI) / n) / Math.sin(Math.PI / n);
-
-    // Slide the window over the chain's own last 3 known points to seed
-    // each fresh mid-vertex in turn.
-    const loopPts = knownPts.slice();
-    let A = loopPts[loopPts.length - 3];
-    let B = loopPts[loopPts.length - 2];
-    let C = loopPts[loopPts.length - 1];
-    for (let i = 0; i < midVerts.length; i++) {
-      const D = {
-        x: A.x + ratio * (C.x - B.x),
-        y: A.y + ratio * (C.y - B.y),
-        z: A.z + ratio * (C.z - B.z),
-      };
-      const id = midVerts[i];
-      if (id != null && !this.positions.has(id)) this.setPosition(id, D.x, D.y, D.z);
-      loopPts.push(D);
-      A = B;
-      B = C;
-      C = D;
-    }
-
-    // Local surface normal at this corner (from the chain's first 3 known
-    // points, real mesh vertices), used only to give triangle apexes a
-    // small fold-direction jitter so the dihedral term has something to
-    // break flat-saddle symmetry with - same reasoning as the seed
-    // hexagon's own apex jitter.
-    const [pu, p2, p3] = knownPts;
-    let nx = (pu.y - p2.y) * (p3.z - p2.z) - (pu.z - p2.z) * (p3.y - p2.y);
-    let ny = (pu.z - p2.z) * (p3.x - p2.x) - (pu.x - p2.x) * (p3.z - p2.z);
-    let nz = (pu.x - p2.x) * (p3.y - p2.y) - (pu.y - p2.y) * (p3.x - p2.x);
-    const nlen = Math.hypot(nx, ny, nz) || 1;
-    nx /= nlen;
-    ny /= nlen;
-    nz /= nlen;
-
-    // centroid of the new polygon loop, used to orient each triangle apex
-    // "outward" from the cell.
-    let cx = 0,
-      cy = 0,
-      cz = 0;
-    for (const p of loopPts) {
-      cx += p.x;
-      cy += p.y;
-      cz += p.z;
-    }
-    cx /= loopPts.length;
-    cy /= loopPts.length;
-    cz /= loopPts.length;
-
-    // Triangle apexes: one per edge along the chain [w, mid_1, ..., mid_{n-3}, u]
-    // (for the join-edge case, midVerts is empty and this is just [w, u]).
-    // w is the last vertex of the known chain; the mid-verts (if any) were
-    // appended to loopPts right after it.
-    const w = loopPts[existingChain.length - 1];
-    const u = loopPts[0];
-    const chain = [w, ...loopPts.slice(existingChain.length), u];
-    const jitter = 0.02;
-    for (let i = 0; i < apexVerts.length; i++) {
-      const pa = chain[i];
-      const pb = chain[i + 1];
-      const apexId = apexVerts[i];
-      if (apexId == null || this.positions.has(apexId) || !pa || !pb) continue;
-      const mx = (pa.x + pb.x) / 2;
-      const my = (pa.y + pb.y) / 2;
-      const mz = (pa.z + pb.z) / 2;
-      // outward-from-centroid direction at this edge's midpoint, in-plane
-      let dx = mx - cx,
-        dy = my - cy,
-        dz = mz - cz;
-      const dlen = Math.hypot(dx, dy, dz) || 1;
-      dx /= dlen;
-      dy /= dlen;
-      dz /= dlen;
-      // equilateral-triangle apex height for the actual base edge length
-      const edgeLen = Math.hypot(pb.x - pa.x, pb.y - pa.y, pb.z - pa.z) || 1;
-      const height = (edgeLen * Math.sqrt(3)) / 2;
-      const foldSign = i % 2 === 0 ? -1 : 1; // alternate to break flat-saddle symmetry
-      const fx = mx + dx * height + foldSign * jitter * nx;
-      const fy = my + dy * height + foldSign * jitter * ny;
-      const fz = mz + dz * height + foldSign * jitter * nz;
-      this.setPosition(apexId, fx, fy, fz);
-    }
+    const { mid, apex } = seedPlacementPositions(knownPts, midVerts.length, apexVerts.length);
+    const ids = [...midVerts, ...apexVerts];
+    const pts = [...mid, ...apex];
+    ids.forEach((id, i) => {
+      if (id != null && !this.positions.has(id)) this.setPosition(id, pts[i].x, pts[i].y, pts[i].z);
+    });
   }
 
   // Advance the simulation by one step given the current graph topology.

@@ -1,15 +1,10 @@
 import * as THREE from "three";
 import { TrackballControls } from "three/addons/controls/TrackballControls.js";
 import { WeaveGraph } from "./weaveGraph.js";
-import { Physics, DEFAULT_PARAMS } from "./physics.js";
-import {
-  DEFAULT_STRIP_PARAMS,
-  buildStripModel,
-  createStripState,
-  deriveStripState,
-  createRibbonLayout,
-  writeRibbonMesh,
-} from "./strips.js";
+import { DEFAULT_STRIP_PARAMS, buildStripModel, createRibbonLayout, writeRibbonMesh, crossingPosition } from "./strips.js";
+import { seedPlacementPositions } from "./seeding.js";
+import { reconcileStripState } from "./stripState.js";
+import { DEFAULT_SOLVER_PARAMS, stepSolver, adjustTails } from "./solver.js";
 
 // ---------------------------------------------------------------------------
 // Scene setup
@@ -46,48 +41,31 @@ window.addEventListener("resize", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Graph + physics state
+// Graph + strips. The weave graph is topology only; every position lives in
+// the strip solver's state, and graph vertices are located through its
+// crossing table (crossingPosition). Graph positions exist only once, to
+// build the seed's strips.
 // ---------------------------------------------------------------------------
 
 const graph = new WeaveGraph();
-const physics = new Physics();
 
-function initialLayout(hexVerts, apexVerts) {
-  // Face-on regular hexagon in the XY plane, apexes pushed outward.
+// Face-on regular hexagon in the XY plane with equilateral boundary
+// triangles: the apex radius is the unit hexagon's apothem plus a unit
+// triangle's height.
+function seedLayout(hexVerts, apexVerts) {
+  const positions = new Map();
   const hexR = 1 / (2 * Math.sin(Math.PI / 6)); // = 1 for hexagon (edge length 1)
   for (let i = 0; i < 6; i++) {
     const a = (Math.PI / 3) * i - Math.PI / 2;
-    physics.setPosition(hexVerts[i], hexR * Math.cos(a), hexR * Math.sin(a), 0);
+    positions.set(hexVerts[i], { x: hexR * Math.cos(a), y: hexR * Math.sin(a), z: 0 });
   }
-  // apex_i sits between hexVert_i and hexVert_{i+1}, pushed further out and
-  // nudged slightly in z (small independent random sign per apex) so the
-  // dihedral-angle relaxation has a direction to fold into (an exactly flat
-  // start is a symmetric saddle it can't break out of on its own). Random
-  // sign, not a uniform offset, so triangles fold outward independently
-  // instead of the whole ring curling coherently toward/away from camera.
-  // apothem (center-to-edge-midpoint distance) of the unit-edge hexagon,
-  // plus the height of a unit-edge equilateral triangle, gives the radius
-  // that makes every boundary triangle equilateral (all 3 edges unit
-  // length) rather than isosceles.
   const apexR = hexR * Math.cos(Math.PI / 6) + Math.sqrt(3) / 2;
   for (let i = 0; i < 6; i++) {
     const a = (Math.PI / 3) * i - Math.PI / 2 + Math.PI / 6;
-    const jitterZ = (Math.random() < 0.5 ? -1 : 1) * 0.05;
-    physics.setPosition(apexVerts[i], apexR * Math.cos(a), apexR * Math.sin(a), jitterZ);
+    positions.set(apexVerts[i], { x: apexR * Math.cos(a), y: apexR * Math.sin(a), z: 0 });
   }
+  return positions;
 }
-
-function seed() {
-  const { hexVerts, apexVerts } = graph.seedHexagon();
-  initialLayout(hexVerts, apexVerts);
-}
-seed();
-
-// ---------------------------------------------------------------------------
-// Woven strips, derived from the graph (see strips.js). The model is rebuilt
-// only on topology changes; its node state is re-derived from the physics
-// positions every frame, and the ribbon mesh is written from that state.
-// ---------------------------------------------------------------------------
 
 const STRIP_STORAGE_KEY = "weaveGraph.stripParams";
 const stripParams = { ...DEFAULT_STRIP_PARAMS };
@@ -95,6 +73,17 @@ try {
   const raw = JSON.parse(localStorage.getItem(STRIP_STORAGE_KEY) || "{}");
   for (const key of ["width", "thickness"]) {
     if (typeof raw[key] === "number" && Number.isFinite(raw[key])) stripParams[key] = raw[key];
+  }
+} catch {
+  // ignore - defaults are fine
+}
+
+const SOLVER_STORAGE_KEY = "weaveGraph.solverParams";
+const solverParams = { ...DEFAULT_SOLVER_PARAMS };
+try {
+  const raw = JSON.parse(localStorage.getItem(SOLVER_STORAGE_KEY) || "{}");
+  for (const key of Object.keys(DEFAULT_SOLVER_PARAMS)) {
+    if (typeof raw[key] === "number" && Number.isFinite(raw[key])) solverParams[key] = raw[key];
   }
 } catch {
   // ignore - defaults are fine
@@ -113,10 +102,22 @@ const ribbonMesh = new THREE.Mesh(new THREE.BufferGeometry(), ribbonMaterial);
 ribbonMesh.frustumCulled = false; // vertices move every frame; bounds go stale
 scene.add(ribbonMesh);
 
-function rebuildStrips() {
-  stripModel = buildStripModel(graph, stripModel, stripParams.samplesPerEdge);
-  stripState = createStripState(stripModel);
-  ribbonLayout = createRibbonLayout(stripModel);
+// Replace the strip model and state after a topology edit. `seeded` gives
+// positions for vertices the current state can't locate (fresh vertices;
+// all of them when starting over).
+function rebuildStrips(seeded, fromScratch = false) {
+  const previous = stripModel;
+  stripModel = buildStripModel(graph, previous, stripParams.samplesPerEdge);
+  stripState = fromScratch
+    ? reconcileStripState(null, null, stripModel, seeded, stripParams)
+    : reconcileStripState(previous, stripState, stripModel, seeded, stripParams);
+  rebuildRibbonBuffers();
+}
+
+// Ribbon buffers depend on node counts, which change on edits and when
+// tails grow or trim.
+function rebuildRibbonBuffers() {
+  ribbonLayout = createRibbonLayout(stripModel, stripState);
   const geo = new THREE.BufferGeometry();
   const position = new THREE.BufferAttribute(new Float32Array(3 * ribbonLayout.vertexCount), 3);
   const normal = new THREE.BufferAttribute(new Float32Array(3 * ribbonLayout.vertexCount), 3);
@@ -129,15 +130,20 @@ function rebuildStrips() {
   ribbonMesh.geometry.dispose();
   ribbonMesh.geometry = geo;
 }
-rebuildStrips();
 
-function updateStrips() {
-  deriveStripState(stripModel, physics.positions, stripParams, stripState);
+function writeRibbons() {
   const geo = ribbonMesh.geometry;
   writeRibbonMesh(stripModel, ribbonLayout, stripState, stripParams, geo.attributes.position.array, geo.attributes.normal.array);
   geo.attributes.position.needsUpdate = true;
   geo.attributes.normal.needsUpdate = true;
 }
+
+function seed() {
+  const { hexVerts, apexVerts } = graph.seedHexagon();
+  stripModel = null;
+  rebuildStrips(seedLayout(hexVerts, apexVerts), true);
+}
+seed();
 
 let currentMode = { type: "place", n: 6 };
 
@@ -178,13 +184,14 @@ function rebuildTargets() {
 }
 rebuildTargets();
 
+// Graph vertices are located through the strips' crossing table.
 function updateRenderGeometry() {
+  writeRibbons();
+
   for (const [v, mesh] of targetMeshes) {
-    const p = physics.positions.get(v);
+    const p = crossingPosition(stripModel, stripState, v);
     if (p) mesh.position.set(p.x, p.y, p.z);
   }
-
-  updateStrips();
 }
 
 // ---------------------------------------------------------------------------
@@ -220,8 +227,13 @@ for (const btn of polygonGroup.querySelectorAll(".mode-btn[data-n]")) {
 deleteBtn.addEventListener("click", setModeDelete);
 
 const flipBtn = document.getElementById("flip-weave");
+// Flipping over/under can't be a continuous motion (every crossing would
+// have to pass through itself), so rebuild the strips from the current
+// crossing positions with the other sigma.
 flipBtn.addEventListener("click", () => {
+  const positions = new Map([...stripModel.crossings.keys()].map((v) => [v, crossingPosition(stripModel, stripState, v)]));
   stripModel.sigma = -stripModel.sigma;
+  rebuildStrips(positions, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -263,44 +275,27 @@ function handleTargetClick(vertexId) {
     if (!record) return;
     const existingChain =
       record.kind === "fuse" ? [record.u, ...record.siteVerts] : [record.u, ...record.siteVerts, record.w];
-    physics.seedPlacement(existingChain, record.midVerts, record.apexVerts);
+    // The strip model hasn't been rebuilt yet, so it still has every chain
+    // vertex (even the one a fuse just merged away).
+    const knownPts = existingChain.map((v) => crossingPosition(stripModel, stripState, v));
+    const { mid, apex } = seedPlacementPositions(knownPts, record.midVerts.length, record.apexVerts.length);
+    const seeded = new Map();
+    record.midVerts.forEach((v, i) => seeded.set(v, mid[i]));
+    record.apexVerts.forEach((v, i) => seeded.set(v, apex[i]));
+    rebuildStrips(seeded);
   } else if (currentMode.type === "delete") {
-    graph.deleteAt(vertexId);
-    physics.pruneTo(new Set(graph.vertices.keys()));
+    if (!graph.deleteAt(vertexId)) return;
+    rebuildStrips(new Map());
   }
   rebuildTargets();
-  rebuildStrips();
 }
 
 renderer.domElement.addEventListener("pointerdown", onPointerDown);
 renderer.domElement.addEventListener("pointerup", onPointerUp);
 
 // ---------------------------------------------------------------------------
-// Physics tuning panel
+// Tuning panel: solver parameters and strip geometry
 // ---------------------------------------------------------------------------
-
-const TUNING_STORAGE_KEY = "weaveGraph.physicsParams";
-
-function loadStoredParams() {
-  try {
-    const raw = localStorage.getItem(TUNING_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveStoredParams() {
-  try {
-    const toStore = {};
-    for (const key of sliderIds) toStore[key] = physics[key];
-    localStorage.setItem(TUNING_STORAGE_KEY, JSON.stringify(toStore));
-  } catch {
-    // ignore (private browsing, quota, etc.) - tuning still works this session
-  }
-}
 
 const tuningPanel = document.getElementById("tuning-panel");
 const tuningHeader = document.getElementById("tuning-header");
@@ -308,69 +303,52 @@ const tuningReset = document.getElementById("tuning-reset");
 
 tuningHeader.addEventListener("click", () => tuningPanel.classList.toggle("collapsed"));
 
-const sliderIds = Object.keys(DEFAULT_PARAMS);
-const stored = loadStoredParams();
-for (const key of sliderIds) {
-  if (typeof stored[key] === "number" && Number.isFinite(stored[key])) {
-    physics[key] = stored[key];
-  }
-}
+// slider id -> [params object, key, defaults, decimals, storage key]
+const sliders = [
+  ["substeps", solverParams, "substeps", DEFAULT_SOLVER_PARAMS, 0],
+  ["iterations", solverParams, "iterations", DEFAULT_SOLVER_PARAMS, 0],
+  ["planarStiffness", solverParams, "planarStiffness", DEFAULT_SOLVER_PARAMS, 2],
+  ["twistStiffness", solverParams, "twistStiffness", DEFAULT_SOLVER_PARAMS, 2],
+  ["bendStiffness", solverParams, "bendStiffness", DEFAULT_SOLVER_PARAMS, 2],
+  ["friction", solverParams, "friction", DEFAULT_SOLVER_PARAMS, 2],
+  ["apexGrip", solverParams, "apexGrip", DEFAULT_SOLVER_PARAMS, 2],
+  ["crossingGrip", solverParams, "crossingGrip", DEFAULT_SOLVER_PARAMS, 2],
+  ["damping", solverParams, "damping", DEFAULT_SOLVER_PARAMS, 2],
+  ["strip-width", stripParams, "width", DEFAULT_STRIP_PARAMS, 2],
+  ["strip-thickness", stripParams, "thickness", DEFAULT_STRIP_PARAMS, 2],
+];
 
-function setSliderDisplay(key, value) {
-  const input = document.getElementById(key);
-  const valLabel = document.querySelector(`.val[data-val="${key}"]`);
-  input.value = value;
-  // damping's range is much finer (0-0.1) than the other 0-1ish sliders, so
-  // it needs an extra decimal of display precision or small adjustments all
-  // show as "0.02" -> "0.02" with no visible change.
-  const decimals = key === "damping" ? 3 : 2;
-  valLabel.textContent = value.toFixed(decimals);
-}
-
-for (const key of sliderIds) {
-  setSliderDisplay(key, physics[key]);
-  const input = document.getElementById(key);
-  input.addEventListener("input", () => {
-    const v = parseFloat(input.value);
-    physics[key] = v;
-    setSliderDisplay(key, v);
-    saveStoredParams();
-  });
-}
-
-// strip geometry sliders (render-only for now; not physics params)
-const stripSliderIds = ["width", "thickness"];
-function setStripSliderDisplay(key) {
-  document.getElementById("strip-" + key).value = stripParams[key];
-  document.querySelector(`.val[data-val="strip-${key}"]`).textContent = stripParams[key].toFixed(2);
-}
-function saveStripParams() {
+function saveParams() {
   try {
+    localStorage.setItem(SOLVER_STORAGE_KEY, JSON.stringify(solverParams));
     localStorage.setItem(STRIP_STORAGE_KEY, JSON.stringify({ width: stripParams.width, thickness: stripParams.thickness }));
   } catch {
-    // ignore
+    // ignore (private browsing, quota, etc.) - tuning still works this session
   }
 }
-for (const key of stripSliderIds) {
-  setStripSliderDisplay(key);
-  document.getElementById("strip-" + key).addEventListener("input", (e) => {
-    stripParams[key] = parseFloat(e.target.value);
-    setStripSliderDisplay(key);
-    saveStripParams();
+
+function showSlider([id, params, key, , decimals]) {
+  document.getElementById(id).value = params[key];
+  document.querySelector(`.val[data-val="${id}"]`).textContent = params[key].toFixed(decimals);
+}
+
+for (const slider of sliders) {
+  const [id, params, key] = slider;
+  showSlider(slider);
+  document.getElementById(id).addEventListener("input", (e) => {
+    params[key] = parseFloat(e.target.value);
+    showSlider(slider);
+    saveParams();
   });
 }
 
 tuningReset.addEventListener("click", () => {
-  for (const key of sliderIds) {
-    physics[key] = DEFAULT_PARAMS[key];
-    setSliderDisplay(key, DEFAULT_PARAMS[key]);
+  for (const slider of sliders) {
+    const [, params, key, defaults] = slider;
+    params[key] = defaults[key];
+    showSlider(slider);
   }
-  saveStoredParams();
-  for (const key of stripSliderIds) {
-    stripParams[key] = DEFAULT_STRIP_PARAMS[key];
-    setStripSliderDisplay(key);
-  }
-  saveStripParams();
+  saveParams();
 });
 
 // ---------------------------------------------------------------------------
@@ -380,11 +358,8 @@ tuningReset.addEventListener("click", () => {
 function animate() {
   requestAnimationFrame(animate);
 
-  const edges = graph.edges().map(([a, b]) => [a, b]);
-  const faces = graph.allFaces();
-  const edgeFaces = graph.edgesWithAdjacentFaces();
-  const degree4Vertices = graph.degree4VertexNeighbors();
-  physics.step(edges, faces, edgeFaces, degree4Vertices);
+  stepSolver(stripModel, stripState, solverParams, stripParams);
+  if (adjustTails(stripModel, stripState, stripParams)) rebuildRibbonBuffers();
 
   updateRenderGeometry();
   controls.update();

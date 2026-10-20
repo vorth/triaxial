@@ -38,7 +38,9 @@ export const DEFAULT_STRIP_PARAMS = {
   width: 0.2, // in-surface width of a strip (edge length = 1)
   thickness: 0.02, // along the surface normal; also the over/under separation
   apexExtension: 0.3, // how far an open strip runs straight past its end apex
-  samplesPerEdge: 8, // nodes per crossing-to-crossing span (topology-time)
+  samplesPerEdge: 8, // nodes per crossing-to-crossing span (derived state)
+  nodeSpacing: 0.5, // material spacing of solver-state nodes (0.125 was too fine: curl and
+  // swerve constraints between neighbouring nodes reached too little strip)
 };
 
 const edgeKey = (a, b) => (a < b ? a + "_" + b : b + "_" + a);
@@ -64,7 +66,7 @@ function buildCrossings(graph) {
     const ring = firstSectorIsPolygon ? neighbors.slice() : [neighbors[1], neighbors[2], neighbors[3], neighbors[0]];
     crossings.set(v, {
       v,
-      kind: graph.faceCount(v) === 4 ? "interior" : "boundary",
+      kind: graph.faceCount(v) === 4 ? "interior" : "nesting",
       ring,
       positive: [ring[0], ring[2]],
       passes: [],
@@ -138,6 +140,28 @@ function stripEdgeKeys(strip) {
   return keys;
 }
 
+// Orient each retraced strip like the previous strip it shares material
+// with, so state carried across an edit keeps its direction of travel (and
+// an untouched strip comes back identical). Tracing order is arbitrary, so
+// without this a strip could come back reversed.
+function alignWithPrevious(strips, previous) {
+  for (const s of strips) {
+    const n = s.verts.length;
+    const spans = s.closed ? n : n - 1;
+    for (let i = 0; i < spans; i++) {
+      const a = s.verts[i];
+      const b = s.verts[(i + 1) % n];
+      const old = previous.spanIndex.get(edgeKey(a, b));
+      if (!old) continue;
+      if (previous.strips[old.strip].verts[old.index] !== a) {
+        // reversed; a closed strip keeps its starting vertex
+        s.verts = s.closed ? [s.verts[0], ...s.verts.slice(1).reverse()] : s.verts.reverse();
+      }
+      break;
+    }
+  }
+}
+
 // Stable colors: each new strip inherits the color most of its edges had in
 // the previous model (largest strips claim first, so when a placement merges
 // strips the bigger part keeps its color); anything unclaimed gets a fresh
@@ -172,8 +196,14 @@ function assignColors(strips, previous) {
 //   strips: [{ id, verts, closed, color, edgeKeys,
 //              nodeOffset, nodeCount,      slice of the global node arrays
 //              vertexNode: [i -> node index within this strip] }],
-//   crossings: Map<vertexId, { v, kind, ring, positive,
+//   crossings: Map<vertexId, { v, index, kind, ring, positive,
 //              passes: [{ strip, index, node, tait }] x2 }>,
+//                                         kind: 'interior' | 'nesting' | 'apex'
+//                                         (| 'irregular' in a malformed graph);
+//                                         index: slot in StripState.passS
+//   crossingCount,
+//   spanIndex: Map<edgeKey, { strip, index }>   span i of a strip runs
+//                                         verts[i] -> verts[i+1] (wrapping)
 //   nodeCount,                            total nodes across all strips
 //   edgeColor, nextColor,                 color inheritance bookkeeping
 //   samplesPerEdge,
@@ -189,6 +219,7 @@ function assignColors(strips, previous) {
 export function buildStripModel(graph, previous = null, samplesPerEdge = DEFAULT_STRIP_PARAMS.samplesPerEdge) {
   const crossings = buildCrossings(graph);
   const strips = traceStrips(graph, crossings);
+  if (previous) alignWithPrevious(strips, previous);
   strips.forEach((s, i) => {
     s.id = i;
     s.edgeKeys = stripEdgeKeys(s);
@@ -215,10 +246,18 @@ export function buildStripModel(graph, previous = null, samplesPerEdge = DEFAULT
     });
   }
 
+  let crossingIndex = 0;
+  for (const c of crossings.values()) c.index = crossingIndex++;
+
+  const spanIndex = new Map();
+  for (const s of strips) s.edgeKeys.forEach((k, i) => spanIndex.set(k, { strip: s.id, index: i }));
+
   return {
     sigma: previous ? previous.sigma : 1,
     strips,
     crossings,
+    crossingCount: crossingIndex,
+    spanIndex,
     nodeCount: nodeOffset,
     edgeColor,
     nextColor,
@@ -230,17 +269,126 @@ export function buildStripModel(graph, previous = null, samplesPerEdge = DEFAULT
 // 2. State (the solver's layout; derived from the graph for now)
 // ---------------------------------------------------------------------------
 
-// StripState {
+// StripState - shared by the derived state below and the solver-owned state
+// (stripState.js); everything downstream (crossing table, rendering) reads
+// only these fields:
+//   strips:   [{ nodeOffset, nodeCount, closed, length }]  node layout per
+//             strip, parallel to model.strips (the solver's state adds h,
+//             sStart and B; tails make nodeCount change over time, which is
+//             why layout lives here and not in the model)
 //   position: Float32Array(3 * nodeCount)   strip centerline nodes
 //   director: Float32Array(3 * nodeCount)   unit ribbon normal per node,
-//                                           perpendicular to the tangent,
-//                                           continuous along each strip
-// }
+//                                           perpendicular to the tangent
+//   arc:      Float64Array(nodeCount)       material coordinate of each node
+//                                           (increasing along the strip; need
+//                                           not start at 0)
+//   passS:    Float64Array(2 * crossingCount)  the crossing table: material
+//                                           coordinate s of each crossing's two
+//                                           passes, at [2*index] and [2*index+1]
+//                                           in crossing.passes order
+// The crossing table is how graph vertices are located once the strips own
+// all positions: a vertex is wherever its two strips cross, i.e. at its
+// passes' material coordinates (see crossingPosition).
 export function createStripState(model) {
   return {
+    strips: model.strips.map((s) => ({ nodeOffset: s.nodeOffset, nodeCount: s.nodeCount, closed: s.closed, length: 0 })),
     position: new Float32Array(3 * model.nodeCount),
     director: new Float32Array(3 * model.nodeCount),
+    arc: new Float64Array(model.nodeCount),
+    passS: new Float64Array(2 * model.crossingCount),
   };
+}
+
+// Recompute each node's material coordinate (and each strip's length) from
+// the current node positions - for the derived state, whose nodes aren't at
+// fixed material spacing.
+export function updateArcLengths(state) {
+  const pos = state.position;
+  for (const s of state.strips) {
+    let acc = 0;
+    state.arc[s.nodeOffset] = 0;
+    for (let k = 1; k < s.nodeCount; k++) {
+      const a = 3 * (s.nodeOffset + k - 1);
+      const b = a + 3;
+      acc += Math.hypot(pos[b] - pos[a], pos[b + 1] - pos[a + 1], pos[b + 2] - pos[a + 2]);
+      state.arc[s.nodeOffset + k] = acc;
+    }
+    if (s.closed) {
+      const a = 3 * (s.nodeOffset + s.nodeCount - 1);
+      const b = 3 * s.nodeOffset;
+      acc += Math.hypot(pos[b] - pos[a], pos[b + 1] - pos[a + 1], pos[b + 2] - pos[a + 2]);
+    }
+    s.length = acc;
+  }
+}
+
+// Total material length of a strip (a closed strip includes its closing
+// segment back to node 0).
+export function stripLength(state, stripId) {
+  return state.strips[stripId].length;
+}
+
+// Point on a strip's centerline at material coordinate `s`, interpolated
+// between nodes. A closed strip wraps; an open strip extrapolates straight
+// past its end nodes (along the end segment), so callers can ask for a
+// little more material than exists.
+export function stripPointAt(state, stripId, s, array = state.position) {
+  const strip = state.strips[stripId];
+  const base = strip.nodeOffset;
+  const m = strip.nodeCount;
+  const arc = state.arc;
+  const first = arc[base];
+  const last = arc[base + m - 1];
+  const lerp = (ka, kb, t) => {
+    const a = 3 * ka;
+    const b = 3 * kb;
+    return [0, 1, 2].map((i) => array[a + i] + t * (array[b + i] - array[a + i]));
+  };
+  if (m === 1) return lerp(base, base, 0);
+  if (strip.closed) {
+    const len = strip.length;
+    s = first + ((((s - first) % len) + len) % len);
+    if (s >= last) {
+      // closing segment, last node -> node 0
+      const gap = first + len - last;
+      return lerp(base + m - 1, base, gap > 0 ? (s - last) / gap : 0);
+    }
+  } else if (s <= first) {
+    return lerp(base, base + 1, (s - first) / (arc[base + 1] - first || 1));
+  } else if (s === last) {
+    return lerp(base + m - 1, base + m - 1, 0);
+  } else if (s > last) {
+    return lerp(base + m - 2, base + m - 1, 1 + (s - last) / (last - arc[base + m - 2] || 1));
+  }
+  // binary search for the segment [lo, hi] containing s
+  let lo = 0;
+  let hi = m - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (arc[base + mid] <= s) lo = mid;
+    else hi = mid;
+  }
+  const span = arc[base + hi] - arc[base + lo];
+  return lerp(base + lo, base + hi, span > 0 ? (s - arc[base + lo]) / span : 0);
+}
+
+// Where graph vertex `v` is: the midpoint of its two passes' points. (Each
+// pass sits thickness/2 to either side of the crossing.) Null if `v` isn't
+// a crossing of this model.
+export function crossingPosition(model, state, v) {
+  const c = model.crossings.get(v);
+  if (!c || c.passes.length === 0) return null;
+  let x = 0,
+    y = 0,
+    z = 0;
+  c.passes.forEach((pass, k) => {
+    const p = stripPointAt(state, pass.strip, state.passS[2 * c.index + k]);
+    x += p[0];
+    y += p[1];
+    z += p[2];
+  });
+  const n = c.passes.length;
+  return { x: x / n, y: y / n, z: z / n };
 }
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -396,6 +544,16 @@ export function deriveStripState(model, positions, params, state) {
       dir[o + 2] = dd[2];
     }
   }
+
+  // Material coordinates and the crossing table. In this derived state each
+  // pass sits exactly on its strip's crossing node; the solver will instead
+  // re-track s by closest-point search as strips slide.
+  updateArcLengths(state);
+  for (const c of model.crossings.values()) {
+    c.passes.forEach((pass, k) => {
+      state.passS[2 * c.index + k] = state.arc[model.strips[pass.strip].nodeOffset + pass.node];
+    });
+  }
   return state;
 }
 
@@ -424,17 +582,18 @@ export function stripColorRGB(index) {
 // own 2 vertices so it can carry a flat normal). Closed strips repeat their
 // first node as a final ring so the seam closes; open strips get end caps.
 // Corners go counterclockwise in the (B, N) plane: +B+N, -B+N, -B-N, +B-N.
-export function createRibbonLayout(model) {
+export function createRibbonLayout(model, state) {
   const parts = [];
   let vertexCount = 0;
   let indexCount = 0;
-  for (const s of model.strips) {
+  model.strips.forEach((strip, i) => {
+    const s = state.strips[i]; // node layout comes from the state
     const rings = s.closed ? s.nodeCount + 1 : s.nodeCount;
     const verts = rings * 8 + (s.closed ? 0 : 8);
-    parts.push({ strip: s, rings, vertexOffset: vertexCount });
+    parts.push({ strip, layout: s, rings, vertexOffset: vertexCount });
     vertexCount += verts;
     indexCount += (rings - 1) * 24 + (s.closed ? 0 : 12);
-  }
+  });
   const index = new Uint32Array(indexCount);
   const color = new Float32Array(3 * vertexCount);
   let ii = 0;
@@ -468,7 +627,7 @@ export function writeRibbonMesh(model, layout, state, params, outPosition, outNo
   const ht = params.thickness / 2;
   const pos = state.position;
   const dir = state.director;
-  for (const { strip: s, rings, vertexOffset: vo } of layout.parts) {
+  for (const { layout: s, rings, vertexOffset: vo } of layout.parts) {
     const m = s.nodeCount;
     let prevB = null;
     const corners = [];

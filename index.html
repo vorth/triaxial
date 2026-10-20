@@ -196,57 +196,81 @@
 
   <div id="tuning-panel" class="collapsed">
     <div id="tuning-header">
-      <span>Physics Tuning</span>
+      <span>Solver Tuning</span>
       <span class="chev">▾</span>
     </div>
     <div class="tuning-body">
       <div class="tuning-row">
         <label>
-          <span>Edge Stiffness</span>
-          <span class="val" data-val="springStiffness"></span>
+          <span>Substeps</span>
+          <span class="val" data-val="substeps"></span>
         </label>
-        <input type="range" id="springStiffness" min="0" max="1" step="0.01" />
-        <span class="desc">How hard edges resist stretching past unit length.</span>
+        <input type="range" id="substeps" min="1" max="30" step="1" />
+        <span class="desc">Solver substeps per frame (more = stiffer and slower).</span>
       </div>
       <div class="tuning-row">
         <label>
-          <span>Angle Regularity</span>
-          <span class="val" data-val="angleStiffness"></span>
+          <span>Iterations</span>
+          <span class="val" data-val="iterations"></span>
         </label>
-        <input type="range" id="angleStiffness" min="0" max="2" step="0.02" />
-        <span class="desc">Pull toward equal interior angles (regular polygons).</span>
+        <input type="range" id="iterations" min="1" max="8" step="1" />
+        <span class="desc">Constraint passes per substep (more = rules agree better, but slower).</span>
       </div>
       <div class="tuning-row">
         <label>
-          <span>Planarity</span>
+          <span>Swerve Stiffness</span>
           <span class="val" data-val="planarStiffness"></span>
         </label>
-        <input type="range" id="planarStiffness" min="0" max="1.5" step="0.01" />
-        <span class="desc">How flat each cell wants to lie in its own plane.</span>
+        <input type="range" id="planarStiffness" min="0" max="1" step="0.01" />
+        <span class="desc">Resistance to swerve: bending around the strip's thickness axis, within its own plane. 1 = none allowed.</span>
       </div>
       <div class="tuning-row">
         <label>
-          <span>Dihedral Fold</span>
-          <span class="val" data-val="dihedralStiffness"></span>
+          <span>Twist Stiffness</span>
+          <span class="val" data-val="twistStiffness"></span>
         </label>
-        <input type="range" id="dihedralStiffness" min="0" max="1.5" step="0.01" />
-        <span class="desc">Push boundary triangles to fold ~180° from their cell.</span>
+        <input type="range" id="twistStiffness" min="0" max="1" step="0.01" />
+        <span class="desc">Resistance to twisting along a strip.</span>
       </div>
       <div class="tuning-row">
         <label>
-          <span>Collinearity</span>
-          <span class="val" data-val="collinearStiffness"></span>
+          <span>Curl Stiffness</span>
+          <span class="val" data-val="bendStiffness"></span>
         </label>
-        <input type="range" id="collinearStiffness" min="0" max="1.5" step="0.01" />
-        <span class="desc">At interior vertices, keep opposite edge pairs straight through the vertex.</span>
+        <input type="range" id="bendStiffness" min="0" max="1" step="0.01" />
+        <span class="desc">Resistance to curl: bending around the strip's width axis, out of its flat plane. 1 = rigid between neighbouring nodes; gentle curls are still only slowly resisted.</span>
+      </div>
+      <div class="tuning-row">
+        <label>
+          <span>Friction</span>
+          <span class="val" data-val="friction"></span>
+        </label>
+        <input type="range" id="friction" min="0" max="2" step="0.05" />
+        <span class="desc">Coulomb friction where crossing strips are pressed together.</span>
+      </div>
+      <div class="tuning-row">
+        <label>
+          <span>Crossing Grip</span>
+          <span class="val" data-val="crossingGrip"></span>
+        </label>
+        <input type="range" id="crossingGrip" min="0" max="1" step="0.01" />
+        <span class="desc">Static grip at ordinary crossings while touching, regardless of pressure. Holds hole sizes, but strips start curving sideways.</span>
+      </div>
+      <div class="tuning-row">
+        <label>
+          <span>Apex Clip</span>
+          <span class="val" data-val="apexGrip"></span>
+        </label>
+        <input type="range" id="apexGrip" min="0" max="1" step="0.01" />
+        <span class="desc">How firmly strips are clipped together at apex crossings (1 = pinned: no slip at all).</span>
       </div>
       <div class="tuning-row">
         <label>
           <span>Damping</span>
           <span class="val" data-val="damping"></span>
         </label>
-        <input type="range" id="damping" min="0" max="0.1" step="0.002" />
-        <span class="desc">Velocity retained each frame (lower = settles faster).</span>
+        <input type="range" id="damping" min="0" max="0.99" step="0.01" />
+        <span class="desc">Fraction of velocity removed per frame (high = settles calmly).</span>
       </div>
       <div class="tuning-row">
         <label>
