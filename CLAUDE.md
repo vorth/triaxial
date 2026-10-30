@@ -4,8 +4,9 @@ A vanilla-JS, no-build-step Three.js app for designing "weave graphs": polygonal
 cells joined vertex-to-vertex, with a triangle filling every gap between them.
 Open `index.html` directly or serve the directory with any static file server.
 
-Run tests with `npm test` (Node's built-in test runner, no dependencies) — see
-`weaveGraph.test.js`. Run it after any change to `weaveGraph.js` or `physics.js`.
+Run tests with `npm test` (Node's built-in test runner; `npm install` first
+for the one dev dependency, Rapier). Run it after any change to
+`weaveGraph.js`, `strips.js`, `stripState.js` or `rapierWeave.js`.
 
 ## App shell (design-app)
 
@@ -86,7 +87,7 @@ been placed on any vertex it created since).
 More needs to be specified about deletion, since the code is not working at the moment.
 
 **Chord-ratio construction** (seeding fresh vertex positions, in
-`physics.js`'s `seedPlacement`): given 3 consecutive polygon vertices `A, B,
+`seeding.js`'s `seedPlacementPositions`): given 3 consecutive polygon vertices `A, B,
 C`, the next vertex `D` satisfies `D = A + R(n)·(C − B)` — chord `A→D` runs
 parallel to chord `B→C`, scaled by `R(n) = sin(3π/n) / sin(π/n)` (closed
 form; verified against true regular-n-gon diagonal/edge ratios: R=1 for
@@ -129,22 +130,15 @@ straight through each degree-4 vertex (opposite neighbors in the
 `degree4VertexNeighbors()` ring) and ends only at apexes. Over/under is one
 global bit `sigma` plus a local Tait-sign rule per crossing (uses
 `firstSectorIsPolygon`), so it never conflicts and needs no orientability.
-Three layers, kept separate so the future XPBD solver can replace the middle
-one: `StripModel` (topology: node chains, crossings as contact pairs with
-fixed over/under; rebuilt on graph edits), `StripState` (per-node position +
-director in Float32Arrays; currently derived each frame from physics
-positions), and the render-only ribbon mesh. Run `npm test` after changes.
-
-**The app now runs on the XPBD strip solver** (`solver.js`), which owns all
-positions in the solver state (`stripState.js`: nodes at fixed material
-spacing, one width vector per segment with twist stiffness, crossing
-table `passS`). Graph
-vertices are located only through `crossingPosition()`; edits go through
-`reconcileStripState` (span-by-span carry-over). `physics.js` is no longer
-used by the app and is due for removal (step 4; `weaveGraph.test.js` still
-imports it). Spec, status and measured solver findings (high damping
-needed; why pentagons don't yet make domes) are in
-`triaxial-weave-solver-design.md` ("Agreed design for this app").
+Three layers: `StripModel` (topology: node chains, crossings as contact
+pairs with fixed over/under; rebuilt on graph edits), `StripState`
+(`stripState.js`: nodes at fixed material spacing `nodeSpacing` = 0.25, one
+width vector per segment, crossing table `passS`), and the render-only
+ribbon mesh. StripState is the only home of positions: graph vertices are
+located only through `crossingPosition()`, and edits go through
+`reconcileStripState` (span-by-span carry-over; every newly generated span
+gets exactly `edgeLength` = 1 of material, scaled onto the seeded curve,
+because crossings are pinned and a seeded length would be permanent).
 
 ### Strip frame terminology (use these terms)
 
@@ -155,139 +149,46 @@ bending around Z (within the strip's own plane, like a road; never wanted).
 **Twist** is rotation around Y (slight twist allowed). Where two strips
 cross, their Z axes must align.
 
-## Physics model (physics.js)
+## Strip mechanics (rapierWeave.js, Rapier)
 
-One `forces` accumulator per frame; every term below just adds into it
-(order between force terms doesn't matter — they're independent until
-summed), then one semi-implicit-Euler integration step applies the total,
-followed by a separate hard-clamp pass (direct position correction, not a
-force) that keeps every edge within ±10% of unit length.
+The hand-written XPBD solver (`solver.js`) and the older graph-vertex force
+model (`physics.js`) were abandoned and deleted in favour of the Rapier
+engine (`@dimforge/rapier3d-compat`, pinned at 0.21.0: loaded from unpkg via
+the import map in the browser, a dev dependency for Node tests).
+`triaxial-weave-solver-design.md` records the XPBD history and why it never
+produced a pentagon dome.
 
-Current force terms (`DEFAULT_PARAMS` in `physics.js`):
-- **spring** (`springStiffness`): edges as stiff springs toward unit rest
-  length.
-- **angle-regularity** (`angleStiffness`): per-face, rotates each vertex
-  in-plane toward the ideal regular-polygon interior angle. Operates
-  independently per face.
-- **planarity** (`planarStiffness`): per-face, pulls each vertex's
-  out-of-plane component (relative to that face's own best-fit
-  centroid/normal) to zero. Also independent per face — has no opinion
-  about matching a neighboring face's plane.
-- **dihedral** (`dihedralStiffness`, **defaults to 0** — see below): for
-  every edge with 2 adjacent faces, pulls the triangle-side apex toward a
-  180° dihedral relative to the polygon on the other side.
-- **collinearity** (`collinearStiffness`): the newest and currently most
-  load-bearing flatness term — see below.
-- Global momentum removal (not a tunable term): after all forces are
-  summed, strips net force and net torque (exact 3×3 inertia tensor) across
-  the *whole* graph, so the mesh can deform but never drift or spin as a
-  rigid body regardless of any per-term imprecision.
-
-### Collinearity term — what it is and why it's the main flatness mechanism now
-
-At every degree-4 vertex `v` (interior OR boundary nesting vertex — see the
-edge-vs-face-count correction above), find its 4 neighbors in true cyclic
-order via `WeaveGraph.degree4VertexNeighbors()` (reconstructed from each
-face's own adjacency-at-v, chained — works for both the closed 4-cycle case
-and the open 3-or-2-face chain case at a boundary gap). The two **opposite**
-pairs (`n0,n2` and `n1,n3`) should each be collinear through `v`. Verified
-correct even at boundary vertices: hand-derived that for the seed hexagon
-corner (60° triangle + 120° hexagon + 60° triangle + 120° gap = 360°
-exactly), both opposite-pair sums come out to exactly 180°, so enforcing
-both simultaneously at a boundary vertex is mathematically sound, not
-over-constraining.
-
-The force itself: `v` is projected onto the current line through each pair,
-*and* `v` moves too (not just the two neighbors) — see the bug history
-below for why that matters. Neighbors are pulled toward the reflect-through-v
-target at half strength since `v` is now also self-correcting.
-
-### Bugs found and fixed this session (read before touching these files again)
-
-1. **`hingeVertexOf` cyclic-wrap bug** (dihedral term): used
-   `Math.min(ia,ib)`/`Math.max(ia,ib)` to find a face's neighbors of an
-   edge, which is wrong whenever the edge wraps around the array boundary
-   (e.g. edge `(1,8)` in triangle `[1,2,8]` — indices 0 and 2 are cyclically
-   adjacent via wraparound, not via a "forward" 0→2 range). Silently
-   returned an empty hinge set for any wrapped edge, meaning dihedral did
-   nothing there. Fixed by explicitly checking `(ia+1)%n===ib` vs.
-   `(ib+1)%n===ia` to find the true cyclic predecessor/successor.
-
-2. **`degree4VertexNeighbors` (originally `interiorVertexNeighbors`)
-   silently dropped every fully-interior (4-face) vertex** — a regression
-   introduced while generalizing the walk to also cover boundary vertices.
-   The forward-walk loop ran a fixed `faceNeighborPairs.length - 1` steps,
-   which for a closed 4-cycle wraps back around and re-appends the starting
-   vertex as a spurious 5th entry, failing the `length === 4` sanity check
-   and dropping the vertex entirely. This meant **the collinearity term was
-   never actually reaching any interior vertex** for a long stretch of this
-   investigation, and every "collinear-only still curls" result from that
-   period was measuring a term that wasn't doing its main job. Fixed by
-   capping the walk at `neighbors.length < 4` instead of a fixed step count.
-
-3. **Collinearity term's original design only ever treated `v` as a fixed,
-   correct anchor** — pulling its neighbors toward collinearity through
-   `v`'s *current* position, but never correcting `v` itself toward its own
-   neighbors. Since every interior vertex is *also* a neighbor in several
-   other vertices' constraints, a vertex that drifted slightly off-plane
-   for any reason would have its error faithfully propagated outward to its
-   neighbors instead of corrected. Proved this precisely with a from-scratch
-   synthetic test (plain JS objects, no app code): one isolated constraint
-   is perfectly stable; two constraints sharing one vertex reliably
-   amplifies a small initial perturbation into significant drift. Fixed by
-   also projecting `v` onto the current line through each neighbor pair
-   (not just moving the neighbors), at full strength, with the neighbor
-   pull reduced to half strength since `v` now self-corrects too.
-
-4. **Seed hexagon's boundary triangles were isosceles, not equilateral** —
-   apex radius was a hardcoded guess (`hexR + 0.85` ≈ 1.85) instead of the
-   derived value `hexR·cos(30°) + √3/2 = √3 ≈ 1.732`. Fixed; verified all
-   three edges of a boundary triangle come out to exactly 1.0 now.
-
-### Open issue: dihedral conflicts with collinearity once a triangle borders 2 polygons
-
-**`dihedralStiffness` now defaults to 0** and is NOT currently reconciled
-with collinearity. Root cause, confirmed via isolated-term long-run tests on
-real hex+triangle topology (not synthetic grids — the user correctly
-pushed back on square/rectangular test cases not representing our actual
-60°/120° topology):
-
-- `collinear + spring` alone (or `+angle`, or `+planar`) converges cleanly
-  toward flat over a long run (tens of thousands of steps) on a 37-polygon
-  all-hexagon mesh grown from the seed.
-- Adding `dihedral` back in (even at its old modest default of 0.08) reliably
-  destabilizes that same mesh into significant, growing curl.
-
-The mechanism (confirmed earlier in the same investigation, before the
-collinearity-vs-dihedral isolation test): once a mesh has more than one
-polygon, some triangles legitimately border **two different polygons** on
-two of their three edges (this happens naturally — e.g. the seed hexagon's
-own flanking triangles, once a neighboring polygon is placed beside them).
-The dihedral term computes its "fold to 180°" target **independently per
-edge**, so such a triangle's two non-shared vertices each get pulled toward
-flatness relative to a *different* polygon, with nothing coordinating the
-two targets. An averaging fix (collect all per-vertex pulls, apply the mean
-instead of the sum) was tried and did NOT resolve it — the bug is in the
-target *direction* being wrong once a triangle has 2 polygon neighbors, not
-in over-summed magnitude.
-
-Dihedral's original purpose — pushing boundary triangles to visibly fold/
-pop outward from their cell, per the project's original design goal — is
-currently unserved by collinearity (which only acts on degree-4 vertices;
-a genuinely open boundary edge with no second face can't have a dihedral
-angle at all, and collinearity doesn't model "pop outward" the way dihedral
-was meant to). If boundary pop-out is wanted again, dihedral needs either:
-(a) to be restricted to true single-polygon-neighbor triangles only (not
-fire at all on a triangle that already borders 2 polygons), or (b) a
-properly coordinated multi-edge target (e.g. treat the triangle as a rigid
-body and least-squares-fit a single orientation satisfying all its
-polygon-adjacent edges at once) — neither has been implemented or tested
-yet.
+- Each StripState segment is a rigid plate (no colliders, so no
+  self-contact yet; mass from `setAdditionalMassProperties`). Plate frame =
+  strip frame (X width, Y along, Z thickness).
+- Neighbouring plates: one generic joint locking translation and rotation
+  about Z (no stretch, no swerve). Curl (X) and twist (Y) get joint *motors*
+  with target angle 0, which is how Rapier gives a joint axis a spring.
+  The JS wrapper in 0.21 returns every joint as a plain generic joint with no
+  motor methods, so they are configured through
+  `world.impulseJoints.raw.jointConfigureMotorPosition`; recheck this on any
+  Rapier upgrade.
+- Crossings are pinned (no sliding): a revolute joint between points on the
+  two plates' faces, offset thickness/2 along Z toward each other per
+  `contactSign`, about both plates' Z axes, so over/under can't flip and the
+  Z axes stay aligned.
+- Every frame, plate poses are written back into StripState (`readBack`),
+  so everything downstream is unchanged. Every edit disposes the world
+  and builds a new one from the reconciled state. Strip width and
+  thickness reach the physics only on that rebuild.
+- Measured defaults (Node, 10 placements including one pentagon, about
+  480 nodes, about 2 ms per frame): curl and twist stiffness 1, the top of
+  the slider (stiffness 10^4; the slider spans 10^2..10^4 because softer
+  strips crumple between crossings and anything stiffer changes little
+  but stretches the joints), damping 0.1 (0.5 and above settles
+  too slowly to see), 8 solver iterations, sleeping off (it could freeze a
+  mesh that is still relaxing). The pentagon mesh goes out of plane
+  (z −0.38..0.51) with spans held at 0.985–1.0.
 
 **Do not assume orientability when reasoning about face normals here** —
 the user flagged early that the eventual mesh editor should support
 non-orientable constructions (e.g. a Klein-bottle-style embedding), so two
 adjacent, coplanar polygons' normals cannot be assumed to point the same
-way. Collinearity and planarity as currently written are orientation-
-agnostic (they never compare one face's normal sign against another's) —
-keep it that way in any future term.
+way. The crossing joints use only each crossing's own local geometry, and a
+closed strip whose width vector comes back flipped across its seam gets a
+half-twisted closing joint. Keep any future term orientation-agnostic too.

@@ -1,21 +1,21 @@
 // weaveGraph.test.js
 // Run with: node --test
 //
-// Covers the combinatorial/topological model (weaveGraph.js) and its
-// integration with the physics seeding (physics.js): placement (normal,
-// joinEdge, fuse, and the too-many-vertices failure), deletion as the exact
-// structural inverse of each, and end-to-end physics stability after both.
+// Covers the combinatorial/topological model (weaveGraph.js) and placement
+// seeding (seeding.js): placement (normal, joinEdge, fuse, and the
+// too-many-vertices failure) and deletion as the exact structural inverse of
+// each. Strip mechanics are covered in rapierWeave.test.js.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { WeaveGraph } from "./weaveGraph.js";
-import { Physics } from "./physics.js";
+import { SeededPositions } from "./testSupport.js";
 
 // ---- shared helpers ---------------------------------------------------
 
-function seedHexWithPhysics() {
+function seedHex() {
   const g = new WeaveGraph();
-  const p = new Physics();
+  const p = new SeededPositions();
   const { hexVerts, apexVerts } = g.seedHexagon();
   const hexR = 1 / (2 * Math.sin(Math.PI / 6));
   for (let i = 0; i < 6; i++) {
@@ -30,13 +30,6 @@ function seedHexWithPhysics() {
   return { g, p, hexVerts, apexVerts };
 }
 
-function settle(g, p, steps = 300) {
-  const edges = g.edges();
-  const faces = g.allFaces();
-  const edgeFaces = g.edgesWithAdjacentFaces();
-  for (let s = 0; s < steps; s++) p.step(edges, faces, edgeFaces);
-}
-
 function place(g, p, v, n) {
   const record = g.placePolygon(v, n);
   if (!record) return null;
@@ -44,13 +37,6 @@ function place(g, p, v, n) {
     record.kind === "fuse" ? [record.u, ...record.siteVerts] : [record.u, ...record.siteVerts, record.w];
   p.seedPlacement(existingChain, record.midVerts, record.apexVerts);
   return record;
-}
-
-function allFinite(p) {
-  for (const pos of p.positions.values()) {
-    if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return false;
-  }
-  return true;
 }
 
 // Find a nesting site of exactly `size` vertices somewhere on the boundary.
@@ -76,49 +62,6 @@ describe("seedHexagon", () => {
     assert.equal(g.triangles.size, 6);
     assert.equal(g.concaveVertices().length, 6);
     assert.equal(g.edges().length, 18);
-  });
-
-  test("settles to a perfectly regular hexagon regardless of dihedral strength", () => {
-    const { g, p, hexVerts } = seedHexWithPhysics();
-    p.dihedralStiffness = 0.4; // near the UI slider's max
-    settle(g, p, 300);
-    for (let i = 0; i < 6; i++) {
-      const prev = p.positions.get(hexVerts[(i + 5) % 6]);
-      const cur = p.positions.get(hexVerts[i]);
-      const next = p.positions.get(hexVerts[(i + 1) % 6]);
-      const e1 = { x: prev.x - cur.x, y: prev.y - cur.y, z: prev.z - cur.z };
-      const e2 = { x: next.x - cur.x, y: next.y - cur.y, z: next.z - cur.z };
-      const l1 = Math.hypot(e1.x, e1.y, e1.z);
-      const l2 = Math.hypot(e2.x, e2.y, e2.z);
-      const cosA = (e1.x * e2.x + e1.y * e2.y + e1.z * e2.z) / (l1 * l2);
-      const deg = (Math.acos(cosA) * 180) / Math.PI;
-      assert.ok(Math.abs(deg - 120) < 0.01, `vertex ${i} interior angle ${deg} should be ~120deg`);
-    }
-  });
-
-  test("dihedral term never moves a polygon's own vertices, only triangle apexes", () => {
-    const { g, p, hexVerts, apexVerts } = seedHexWithPhysics();
-    p.dihedralStiffness = 5.0;
-    p.angleStiffness = 0;
-    p.planarStiffness = 0;
-    p.springStiffness = 0;
-    const edges = g.edges();
-    const faces = g.allFaces();
-    const edgeFaces = g.edgesWithAdjacentFaces();
-    const before = new Map();
-    for (const id of hexVerts) before.set(id, { ...p.positions.get(id) });
-    p.step(edges, faces, edgeFaces); // no momentum removal isolation needed - single step, direct term check
-    // hex vertices should not have moved from the dihedral term itself in any way
-    // that isn't explainable by global momentum removal; check they stay put to
-    // a tight tolerance since all other terms are zeroed and momentum removal
-    // only redistributes a small residual.
-    for (const id of hexVerts) {
-      const b = before.get(id);
-      const a = p.positions.get(id);
-      const moved = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-      assert.ok(moved < 0.2, `hex vertex ${id} moved ${moved}, expected small (momentum-removal residual only)`);
-    }
-    void apexVerts;
   });
 });
 
@@ -274,54 +217,7 @@ describe("deletion", () => {
   });
 });
 
-// ---- end-to-end physics stability ----------------------------------------
-
-describe("physics stability after placement", () => {
-  for (const n of [3, 4, 5, 6, 7]) {
-    test(`n=${n} single-vertex placement settles without NaN/Infinity`, () => {
-      const { g, p, hexVerts } = seedHexWithPhysics();
-      settle(g, p, 100);
-      const record = place(g, p, hexVerts[0], n);
-      assert.ok(record);
-      settle(g, p, 200);
-      assert.ok(allFinite(p));
-    });
-  }
-
-  for (const [n, kind] of [
-    [5, "normal"],
-    [4, "joinEdge"],
-    [3, "fuse"],
-  ]) {
-    test(`${kind} placement on a 2-vertex site settles without NaN/Infinity`, () => {
-      const { g, p, hexVerts } = seedHexWithPhysics();
-      settle(g, p, 100);
-      place(g, p, hexVerts[0], 6);
-      settle(g, p, 50);
-      const site = findNestingSite(g, 2);
-      const record = place(g, p, site.siteVerts[0], n);
-      assert.ok(record);
-      assert.equal(record.kind, kind);
-      settle(g, p, 300);
-      assert.ok(allFinite(p));
-    });
-  }
-
-  test("new placements keep all edges within +-10% of unit length at equilibrium", () => {
-    const { g, p, hexVerts } = seedHexWithPhysics();
-    settle(g, p, 100);
-    place(g, p, hexVerts[0], 6);
-    settle(g, p, 400);
-    for (const [a, b] of g.edges()) {
-      const pa = p.positions.get(a);
-      const pb = p.positions.get(b);
-      const len = Math.hypot(pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
-      assert.ok(len >= 0.9 && len <= 1.1, `edge ${a}-${b} length ${len} outside +-10% of unit`);
-    }
-  });
-});
-
-// ---- chord-ratio construction (physics.js geometry) ----------------------
+// ---- chord-ratio construction (seeding.js geometry) ----------------------
 
 describe("chord-ratio seeding construction", () => {
   test("R(n) matches known regular-polygon diagonal/edge ratios", () => {
@@ -332,8 +228,7 @@ describe("chord-ratio seeding construction", () => {
   });
 
   test("seeded chord A->D is exactly parallel to B->C for every generated mid-vertex", () => {
-    const { g, p, hexVerts } = seedHexWithPhysics();
-    settle(g, p, 300);
+    const { g, p, hexVerts } = seedHex();
     const record = place(g, p, hexVerts[0], 7);
     const loopVerts = [record.u, ...record.siteVerts, record.w, ...record.midVerts];
     const pts = loopVerts.map((id) => p.positions.get(id));

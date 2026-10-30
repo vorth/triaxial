@@ -14,5 +14,6 @@ web component, loaded from its hosted URL, so a network connection is needed.
 npm test
 ```
 
-Runs the topology/physics test suite (`weaveGraph.test.js`) via Node's
-built-in test runner - no dependencies required.
+Runs the test suites (`*.test.js`) via Node's built-in test runner. Run
+`npm install` once first: the strip physics tests need Rapier, the one dev
+dependency. In the browser, Rapier is loaded from unpkg.

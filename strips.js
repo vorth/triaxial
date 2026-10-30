@@ -22,8 +22,7 @@
 // its own normal, so nothing compares orientations between vertices - this
 // stays correct on non-orientable meshes.
 //
-// Layers (kept separate so the eventual XPBD solver can take over the middle
-// one without touching the others):
+// Layers (the Rapier weave, rapierWeave.js, moves the middle one):
 //   1. StripModel (buildStripModel): topology only - strips, their node
 //      chains, crossings as contact pairs with fixed over/under. Rebuilt
 //      only when the graph changes.
@@ -35,12 +34,12 @@
 //      cross-section built from the state.
 
 export const DEFAULT_STRIP_PARAMS = {
-  width: 0.2, // in-surface width of a strip (edge length = 1)
-  thickness: 0.02, // along the surface normal; also the over/under separation
+  width: 0.25, // in-surface width of a strip (edge length = 1)
+  thickness: 0.05, // along the surface normal; also the over/under separation
   apexExtension: 0.3, // how far an open strip runs straight past its end apex
   samplesPerEdge: 8, // nodes per crossing-to-crossing span (derived state)
-  nodeSpacing: 0.5, // material spacing of solver-state nodes (0.125 was too fine: curl and
-  // swerve constraints between neighbouring nodes reached too little strip)
+  edgeLength: 1, // material length of a strip between neighbouring crossings, as placed
+  nodeSpacing: 0.25, // material spacing of solver-state nodes = Rapier plate length
 };
 
 const edgeKey = (a, b) => (a < b ? a + "_" + b : b + "_" + a);

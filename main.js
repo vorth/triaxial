@@ -4,14 +4,14 @@ import { WeaveGraph } from "./weaveGraph.js";
 import { DEFAULT_STRIP_PARAMS, buildStripModel, createRibbonLayout, writeRibbonMesh, crossingPosition } from "./strips.js";
 import { seedPlacementPositions } from "./seeding.js";
 import { reconcileStripState } from "./stripState.js";
-import { DEFAULT_SOLVER_PARAMS, stepSolver, adjustTails } from "./solver.js";
+import { DEFAULT_RAPIER_PARAMS, initRapier, createWeave, setWeaveParams, stepWeave, disposeWeave } from "./rapierWeave.js";
 
 // ---------------------------------------------------------------------------
 // Scene setup
 // ---------------------------------------------------------------------------
 
 const app = document.querySelector("design-app");
-await customElements.whenDefined("design-app");
+await Promise.all([customElements.whenDefined("design-app"), initRapier()]);
 
 const container = document.getElementById("viewport");
 
@@ -50,9 +50,10 @@ resize();
 
 // ---------------------------------------------------------------------------
 // Graph + strips. The weave graph is topology only; every position lives in
-// the strip solver's state, and graph vertices are located through its
-// crossing table (crossingPosition). Graph positions exist only once, to
-// build the seed's strips.
+// the strip state, which the Rapier weave (rapierWeave.js) moves and writes
+// back every frame. Graph vertices are located through its crossing table
+// (crossingPosition). Graph positions exist only once, to build the seed's
+// strips.
 // ---------------------------------------------------------------------------
 
 const graph = new WeaveGraph();
@@ -86,11 +87,11 @@ try {
   // ignore - defaults are fine
 }
 
-const SOLVER_STORAGE_KEY = "weaveGraph.solverParams";
-const solverParams = { ...DEFAULT_SOLVER_PARAMS };
+const SOLVER_STORAGE_KEY = "triaxial.rapierParams";
+const solverParams = { ...DEFAULT_RAPIER_PARAMS };
 try {
   const raw = JSON.parse(localStorage.getItem(SOLVER_STORAGE_KEY) || "{}");
-  for (const key of Object.keys(DEFAULT_SOLVER_PARAMS)) {
+  for (const key of Object.keys(DEFAULT_RAPIER_PARAMS)) {
     if (typeof raw[key] === "number" && Number.isFinite(raw[key])) solverParams[key] = raw[key];
   }
 } catch {
@@ -99,6 +100,7 @@ try {
 
 let stripModel = null;
 let stripState = null;
+let weave = null; // Rapier world built from stripModel + stripState
 let ribbonLayout = null;
 const ribbonMaterial = new THREE.MeshStandardMaterial({
   vertexColors: true,
@@ -121,11 +123,12 @@ function rebuildStrips(seeded, fromScratch = false, sigma) {
   stripState = fromScratch
     ? reconcileStripState(null, null, stripModel, seeded, stripParams)
     : reconcileStripState(previous, stripState, stripModel, seeded, stripParams);
+  if (weave) disposeWeave(weave);
+  weave = createWeave(stripModel, stripState, solverParams, stripParams);
   rebuildRibbonBuffers();
 }
 
-// Ribbon buffers depend on node counts, which change on edits and when
-// tails grow or trim.
+// Ribbon buffers depend on node counts, which change only on edits.
 function rebuildRibbonBuffers() {
   ribbonLayout = createRibbonLayout(stripModel, stripState);
   const geo = new THREE.BufferGeometry();
@@ -377,16 +380,14 @@ renderer.domElement.addEventListener("pointerup", onPointerUp);
 const tuningReset = document.getElementById("tuning-reset");
 
 // slider id -> [params object, key, defaults, decimals, storage key]
+// Strip width and thickness reach the physics (plate inertia, crossing
+// offsets) only when the world is next rebuilt, i.e. on the next edit.
 const sliders = [
-  ["substeps", solverParams, "substeps", DEFAULT_SOLVER_PARAMS, 0],
-  ["iterations", solverParams, "iterations", DEFAULT_SOLVER_PARAMS, 0],
-  ["planarStiffness", solverParams, "planarStiffness", DEFAULT_SOLVER_PARAMS, 2],
-  ["twistStiffness", solverParams, "twistStiffness", DEFAULT_SOLVER_PARAMS, 2],
-  ["bendStiffness", solverParams, "bendStiffness", DEFAULT_SOLVER_PARAMS, 2],
-  ["friction", solverParams, "friction", DEFAULT_SOLVER_PARAMS, 2],
-  ["apexGrip", solverParams, "apexGrip", DEFAULT_SOLVER_PARAMS, 2],
-  ["crossingGrip", solverParams, "crossingGrip", DEFAULT_SOLVER_PARAMS, 2],
-  ["damping", solverParams, "damping", DEFAULT_SOLVER_PARAMS, 2],
+  ["stepsPerFrame", solverParams, "stepsPerFrame", DEFAULT_RAPIER_PARAMS, 0],
+  ["iterations", solverParams, "iterations", DEFAULT_RAPIER_PARAMS, 0],
+  ["curlStiffness", solverParams, "curlStiffness", DEFAULT_RAPIER_PARAMS, 2],
+  ["twistStiffness", solverParams, "twistStiffness", DEFAULT_RAPIER_PARAMS, 2],
+  ["damping", solverParams, "damping", DEFAULT_RAPIER_PARAMS, 2],
   ["strip-width", stripParams, "width", DEFAULT_STRIP_PARAMS, 2],
   ["strip-thickness", stripParams, "thickness", DEFAULT_STRIP_PARAMS, 2],
 ];
@@ -412,6 +413,7 @@ for (const slider of sliders) {
     params[key] = parseFloat(e.target.value);
     showSlider(slider);
     saveParams();
+    setWeaveParams(weave, solverParams);
   });
 }
 
@@ -422,6 +424,7 @@ tuningReset.addEventListener("click", () => {
     showSlider(slider);
   }
   saveParams();
+  setWeaveParams(weave, solverParams);
 });
 
 // ---------------------------------------------------------------------------
@@ -483,8 +486,7 @@ app.addEventListener("app-restore", (event) => {
 function animate() {
   requestAnimationFrame(animate);
 
-  stepSolver(stripModel, stripState, solverParams, stripParams);
-  if (adjustTails(stripModel, stripState, stripParams)) rebuildRibbonBuffers();
+  stepWeave(weave, solverParams);
 
   updateRenderGeometry();
   controls.update();

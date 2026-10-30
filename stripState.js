@@ -90,10 +90,13 @@ function planStrip(strip, oldModel, oldState, newModel, derived, params) {
       if (!forward && sb > sa) sb -= len;
       pieces.push({ source: oldState, strip: old.strip, dir: forward ? 1 : -1, sa, sb, len: Math.abs(sb - sa), old: true });
     } else {
+      // New material is always one unit edge long, mapped proportionally
+      // onto the seeded curve (crossings are pinned, so a seeded length
+      // would be permanent).
       const sa = derived.passS[passSlot(newModel, a, id, j)];
       let sb = derived.passS[passSlot(newModel, b, id, (j + 1) % n)];
       if (sb < sa) sb += derived.strips[id].length;
-      pieces.push({ source: derived, strip: id, dir: 1, sa, sb, len: sb - sa, old: false });
+      pieces.push({ source: derived, strip: id, dir: 1, sa, sb, len: params.edgeLength, scale: (sb - sa) / params.edgeLength, old: false });
     }
   }
 
@@ -106,14 +109,18 @@ function planStrip(strip, oldModel, oldState, newModel, derived, params) {
   cs[anchor] = pieces[anchor].dir === 1 ? pieces[anchor].sa : 0;
   for (let j = anchor; j < spanCount; j++) {
     const p = pieces[j];
-    cs[j + 1] = p.dir === 1 && cs[j] === p.sa ? p.sb : cs[j] + p.len;
+    cs[j + 1] = p.old && p.dir === 1 && cs[j] === p.sa ? p.sb : cs[j] + p.len;
   }
   for (let j = anchor - 1; j >= 0; j--) {
     const p = pieces[j];
-    cs[j] = p.dir === 1 && cs[j + 1] === p.sb ? p.sa : cs[j + 1] - p.len;
+    cs[j] = p.old && p.dir === 1 && cs[j + 1] === p.sb ? p.sa : cs[j + 1] - p.len;
   }
-  // source coordinate = off + dir * new coordinate
-  pieces.forEach((p, j) => (p.off = p.sa - p.dir * cs[j]));
+  // source coordinate of new coordinate q: old material keeps its arc
+  // length (off + dir * q, exact); new material is scaled onto the seed
+  pieces.forEach((p, j) => {
+    p.off = p.sa - p.dir * cs[j];
+    p.src = p.old ? (q) => p.off + p.dir * q : (q) => p.sa + (q - cs[j]) * p.scale;
+  });
 
   const ext = params.apexExtension;
   const anchorPiece = pieces[anchor];
@@ -230,7 +237,7 @@ export function reconcileStripState(oldModel, oldState, newModel, seeded, params
       state.arc[offset + k] = sNew;
       const q = closed ? cs[0] + ((((sNew - cs[0]) % length) + length) % length) : sNew;
       const p = pieceAt(q);
-      const src = p.off + p.dir * q;
+      const src = p.src(q);
       const x = stripPointAt(p.source, p.strip, src);
       const xp = p.old ? stripPointAt(p.source, p.strip, src, p.source.prev) : x;
       state.position.set(x, 3 * (offset + k));
@@ -246,7 +253,7 @@ export function reconcileStripState(oldModel, oldState, newModel, seeded, params
       const sMid = sStart + (j + 0.5) * h;
       const q = closed ? cs[0] + ((((sMid - cs[0]) % length) + length) % length) : sMid;
       const p = pieceAt(q);
-      let wv = widthAt(p.source, p.strip, p.off + p.dir * q);
+      let wv = widthAt(p.source, p.strip, p.src(q));
       if (!p.old) {
         const a = 3 * (offset + j);
         const b = 3 * (offset + ((j + 1) % nodeCount));

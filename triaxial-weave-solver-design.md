@@ -4,6 +4,8 @@
 
 Real-time simulation of triaxial weave: many strips woven together with over-under contact points between strips. Strips are open with bare ends most of the time, and closed loops also occur. Strips bend in one plane but not the other, controlled by a stiffness parameter. Strips do not twist. Thickness is desirable but not required.
 
+> **Superseded (October 30, 2026):** the app no longer uses this solver. Strip mechanics now run on Rapier (`rapierWeave.js`); see `CLAUDE.md`. This document is kept as the record of the XPBD attempt and its findings.
+
 ## Agreed design for this app (October 2026)
 
 This section records the decisions made for the triaxial app. Where it conflicts with the general notes further down, this section wins; superseded bullets below are marked.

@@ -10,7 +10,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { WeaveGraph } from "./weaveGraph.js";
-import { Physics } from "./physics.js";
+import { SeededPositions } from "./testSupport.js";
 import {
   DEFAULT_STRIP_PARAMS,
   buildStripModel,
@@ -30,7 +30,7 @@ import { seedPlacementPositions } from "./seeding.js";
 
 function seedFlat() {
   const g = new WeaveGraph();
-  const p = new Physics();
+  const p = new SeededPositions();
   const { hexVerts, apexVerts } = g.seedHexagon();
   for (let i = 0; i < 6; i++) {
     const a = (Math.PI / 3) * i - Math.PI / 2;
