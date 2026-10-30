@@ -372,3 +372,49 @@ describe("boundary with no apex vertices", () => {
     }
   });
 });
+
+describe("serialization", () => {
+  // A few placements of every kind, through JSON text and back.
+  function grownGraph() {
+    const g = new WeaveGraph();
+    const { hexVerts } = g.seedHexagon();
+    const first = g.placePolygon(hexVerts[0], 6);
+    assert.ok(g.placePolygon(first.midVerts[0], 5));
+    assert.equal(g.placePolygon(findNestingSite(g, 2).siteVerts[0], 3).kind, "fuse");
+    return g;
+  }
+  const roundTrip = (g) => {
+    const h = new WeaveGraph();
+    h.loadJSON(JSON.parse(JSON.stringify(g.toJSON())));
+    return h;
+  };
+
+  test("a round trip reproduces the graph exactly", () => {
+    const g = grownGraph();
+    const h = roundTrip(g);
+    assert.deepEqual(h.toJSON(), g.toJSON());
+    assert.deepEqual(h.concaveVertices(), g.concaveVertices());
+    for (const v of g.vertices.keys()) assert.equal(h.faceCount(v), g.faceCount(v));
+  });
+
+  test("placement provenance survives: leaf deletion and the non-leaf guard", () => {
+    const g = new WeaveGraph();
+    const { hexVerts } = g.seedHexagon();
+    const first = g.placePolygon(hexVerts[0], 6);
+    const second = g.placePolygon(first.midVerts[0], 4);
+    const h = roundTrip(g);
+    assert.equal(h.deleteAt(first.u), false); // has a child
+    assert.ok(h.deleteAt(second.kind === "fuse" ? second.fusedId : second.u));
+    assert.ok(h.deleteAt(first.u)); // a leaf again once its child is gone
+  });
+
+  test("placements after loading never reuse an existing id", () => {
+    const h = roundTrip(grownGraph());
+    const before = new Set([...h.vertices.keys(), ...h.polygons.keys(), ...h.triangles.keys()]);
+    const record = h.placePolygon(h.concaveVertices()[0], 6);
+    assert.ok(record);
+    for (const id of [...record.midVerts, ...record.apexVerts, record.polygonId, ...record.triangleIds]) {
+      assert.ok(!before.has(id));
+    }
+  });
+});

@@ -10,17 +10,19 @@ import { DEFAULT_SOLVER_PARAMS, stepSolver, adjustTails } from "./solver.js";
 // Scene setup
 // ---------------------------------------------------------------------------
 
-const container = document.getElementById("canvas-container");
+const app = document.querySelector("design-app");
+await customElements.whenDefined("design-app");
+
+const container = document.getElementById("viewport");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x14161a);
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
 camera.position.set(0, 0, 8);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
 container.appendChild(renderer.domElement);
 
 scene.add(new THREE.AmbientLight(0xffffff, 1.0));
@@ -33,12 +35,18 @@ controls.noPan = false;
 controls.staticMoving = false;
 controls.dynamicDampingFactor = 0.15;
 
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+// The canvas fills the viewport below <design-app>'s nav bar, not the window.
+function resize() {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  if (w === 0 || h === 0) return;
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(w, h);
   controls.handleResize();
-});
+}
+new ResizeObserver(resize).observe(container);
+resize();
 
 // ---------------------------------------------------------------------------
 // Graph + strips. The weave graph is topology only; every position lives in
@@ -104,10 +112,12 @@ scene.add(ribbonMesh);
 
 // Replace the strip model and state after a topology edit. `seeded` gives
 // positions for vertices the current state can't locate (fresh vertices;
-// all of them when starting over).
-function rebuildStrips(seeded, fromScratch = false) {
+// all of them when starting over). `sigma` overrides the inherited
+// over/under choice.
+function rebuildStrips(seeded, fromScratch = false, sigma) {
   const previous = stripModel;
   stripModel = buildStripModel(graph, previous, stripParams.samplesPerEdge);
+  if (sigma !== undefined) stripModel.sigma = sigma;
   stripState = fromScratch
     ? reconcileStripState(null, null, stripModel, seeded, stripParams)
     : reconcileStripState(previous, stripState, stripModel, seeded, stripParams);
@@ -144,6 +154,56 @@ function seed() {
   rebuildStrips(seedLayout(hexVerts, apexVerts), true);
 }
 seed();
+
+// ---------------------------------------------------------------------------
+// The document: graph topology, the over/under bit, and every graph vertex's
+// current position (the relaxed shape depends on edit history, so a file
+// reopens as it was saved rather than re-relaxing from scratch).
+// ---------------------------------------------------------------------------
+
+const round = (x) => Math.round(x * 1e6) / 1e6;
+
+function snapshot() {
+  const positions = {};
+  for (const v of stripModel.crossings.keys()) {
+    const p = crossingPosition(stripModel, stripState, v);
+    if (p) positions[v] = [round(p.x), round(p.y), round(p.z)];
+  }
+  return { version: 1, graph: graph.toJSON(), sigma: stripModel.sigma, positions };
+}
+
+// Load a snapshot. Unless `fromScratch`, strips that survive keep their
+// current relaxed shape and only vertices the current strips don't have are
+// placed from the snapshot - so undo doesn't snap the mesh to an old pose.
+// A sigma change can't carry over (every crossing would pass through itself).
+function restore(doc, fromScratch = false) {
+  if (doc?.version !== 1 || !doc.graph || !doc.positions) throw new Error("not a weave graph document");
+  const positions = new Map(Object.entries(doc.positions).map(([v, [x, y, z]]) => [Number(v), { x, y, z }]));
+  graph.loadJSON(doc.graph);
+  const scratch = fromScratch || !stripModel || stripModel.sigma !== doc.sigma;
+  if (fromScratch) stripModel = null; // don't inherit colors from an unrelated document
+  const seeded = scratch ? positions : new Map([...positions].filter(([v]) => !stripModel.crossings.has(v)));
+  rebuildStrips(seeded, scratch, doc.sigma);
+  rebuildTargets();
+}
+
+// Run `change` (which returns false if it did nothing) as one undoable step.
+// The change has already happened when the edit is pushed, so the stack's
+// initial redo call is skipped.
+function applyEdit(label, change) {
+  const before = snapshot();
+  if (!change()) return;
+  const after = snapshot();
+  let applied = true;
+  app.edit({
+    label,
+    redo: () => {
+      if (applied) applied = false;
+      else restore(after);
+    },
+    undo: () => restore(before),
+  });
+}
 
 let currentMode = { type: "place", n: 6 };
 
@@ -202,14 +262,17 @@ const polygonGroup = document.getElementById("polygon-group");
 const deleteBtn = document.getElementById("delete-mode");
 const hint = document.getElementById("hint");
 
+function polygonName(n) {
+  return n === 3 ? "triangle" : n === 4 ? "square" : n === 5 ? "pentagon" : n === 6 ? "hexagon" : n + "-gon";
+}
+
 function setModePlace(n) {
   currentMode = { type: "place", n };
   deleteBtn.classList.remove("active");
   for (const btn of polygonGroup.querySelectorAll(".mode-btn")) {
     btn.classList.toggle("active", parseInt(btn.dataset.n, 10) === n);
   }
-  const label = n === 3 ? "triangle" : n === 4 ? "square" : n === 5 ? "pentagon" : n === 6 ? "hexagon" : n + "-gon";
-  hint.textContent = `Click a highlighted vertex to place a ${label}. Drag to rotate, scroll to zoom.`;
+  hint.textContent = `Click a highlighted vertex to place a ${polygonName(n)}.`;
   rebuildTargets();
 }
 
@@ -226,15 +289,14 @@ for (const btn of polygonGroup.querySelectorAll(".mode-btn[data-n]")) {
 }
 deleteBtn.addEventListener("click", setModeDelete);
 
-const flipBtn = document.getElementById("flip-weave");
 // Flipping over/under can't be a continuous motion (every crossing would
 // have to pass through itself), so rebuild the strips from the current
 // crossing positions with the other sigma.
-flipBtn.addEventListener("click", () => {
+function flipWeave() {
   const positions = new Map([...stripModel.crossings.keys()].map((v) => [v, crossingPosition(stripModel, stripState, v)]));
-  stripModel.sigma = -stripModel.sigma;
-  rebuildStrips(positions, true);
-});
+  rebuildStrips(positions, true, -stripModel.sigma);
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Interaction: raycast against target spheres on click/tap
@@ -257,8 +319,9 @@ function onPointerUp(e) {
   pointerDownPos = null;
   if (Math.hypot(dx, dy) > 6) return; // was a drag (trackball gesture), not a tap
 
-  pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
-  pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
 
   const meshes = Array.from(targetMeshes.values());
@@ -271,23 +334,34 @@ function onPointerUp(e) {
 
 function handleTargetClick(vertexId) {
   if (currentMode.type === "place") {
-    const record = graph.placePolygon(vertexId, currentMode.n);
-    if (!record) return;
-    const existingChain =
-      record.kind === "fuse" ? [record.u, ...record.siteVerts] : [record.u, ...record.siteVerts, record.w];
-    // The strip model hasn't been rebuilt yet, so it still has every chain
-    // vertex (even the one a fuse just merged away).
-    const knownPts = existingChain.map((v) => crossingPosition(stripModel, stripState, v));
-    const { mid, apex } = seedPlacementPositions(knownPts, record.midVerts.length, record.apexVerts.length);
-    const seeded = new Map();
-    record.midVerts.forEach((v, i) => seeded.set(v, mid[i]));
-    record.apexVerts.forEach((v, i) => seeded.set(v, apex[i]));
-    rebuildStrips(seeded);
+    applyEdit(`Place ${polygonName(currentMode.n)}`, () => placeAt(vertexId, currentMode.n));
   } else if (currentMode.type === "delete") {
-    if (!graph.deleteAt(vertexId)) return;
-    rebuildStrips(new Map());
+    applyEdit("Delete cell", () => deleteAt(vertexId));
   }
+}
+
+function placeAt(vertexId, n) {
+  const record = graph.placePolygon(vertexId, n);
+  if (!record) return false;
+  const existingChain =
+    record.kind === "fuse" ? [record.u, ...record.siteVerts] : [record.u, ...record.siteVerts, record.w];
+  // The strip model hasn't been rebuilt yet, so it still has every chain
+  // vertex (even the one a fuse just merged away).
+  const knownPts = existingChain.map((v) => crossingPosition(stripModel, stripState, v));
+  const { mid, apex } = seedPlacementPositions(knownPts, record.midVerts.length, record.apexVerts.length);
+  const seeded = new Map();
+  record.midVerts.forEach((v, i) => seeded.set(v, mid[i]));
+  record.apexVerts.forEach((v, i) => seeded.set(v, apex[i]));
+  rebuildStrips(seeded);
   rebuildTargets();
+  return true;
+}
+
+function deleteAt(vertexId) {
+  if (!graph.deleteAt(vertexId)) return false;
+  rebuildStrips(new Map());
+  rebuildTargets();
+  return true;
 }
 
 renderer.domElement.addEventListener("pointerdown", onPointerDown);
@@ -297,11 +371,10 @@ renderer.domElement.addEventListener("pointerup", onPointerUp);
 // Tuning panel: solver parameters and strip geometry
 // ---------------------------------------------------------------------------
 
-const tuningPanel = document.getElementById("tuning-panel");
-const tuningHeader = document.getElementById("tuning-header");
-const tuningReset = document.getElementById("tuning-reset");
+// Lives in <design-app>'s settings panel. Tuning is a per-user preference,
+// not part of the document, so it is kept in its own localStorage entries.
 
-tuningHeader.addEventListener("click", () => tuningPanel.classList.toggle("collapsed"));
+const tuningReset = document.getElementById("tuning-reset");
 
 // slider id -> [params object, key, defaults, decimals, storage key]
 const sliders = [
@@ -349,6 +422,58 @@ tuningReset.addEventListener("click", () => {
     showSlider(slider);
   }
   saveParams();
+});
+
+// ---------------------------------------------------------------------------
+// <design-app>: menu, files and autosave. Undo/redo goes through applyEdit.
+// ---------------------------------------------------------------------------
+
+app.setMenu([
+  { id: "flip", label: "Flip over/under" },
+  { id: "reset-view", label: "Reset view" },
+  { id: "start-over", label: "Start over" },
+]);
+
+app.addEventListener("menu-select", (event) => {
+  const { id } = event.detail;
+  if (id === "flip") {
+    applyEdit("Flip over/under", flipWeave);
+  } else if (id === "reset-view") {
+    controls.reset();
+  } else if (id === "start-over") {
+    applyEdit("Start over", () => {
+      seed();
+      rebuildTargets();
+      return true;
+    });
+  }
+});
+
+app.addEventListener("app-save", (event) => {
+  event.detail.setText(JSON.stringify(snapshot()));
+});
+
+app.addEventListener("app-open", (event) => {
+  try {
+    restore(JSON.parse(event.detail.text), true);
+  } catch (e) {
+    alert(`Could not open ${event.detail.name}: ${e.message}`);
+  }
+});
+
+app.addEventListener("app-new", () => {
+  seed();
+  rebuildTargets();
+});
+
+// Registering this listener is what asks for the autosaved draft, so it
+// comes after everything restore() depends on.
+app.addEventListener("app-restore", (event) => {
+  try {
+    restore(JSON.parse(event.detail.text), true);
+  } catch {
+    // an unreadable draft isn't worth an alert; the seed is still there
+  }
 });
 
 // ---------------------------------------------------------------------------

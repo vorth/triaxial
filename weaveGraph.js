@@ -59,6 +59,68 @@ export class WeaveGraph {
     this._createdBy.clear();
   }
 
+  // ---- serialization --------------------------------------------------------
+
+  // Plain-JSON snapshot of the whole graph, including placement provenance.
+  // Records are written once each, keyed by their polygon id; record
+  // references (a record's parents, a vertex's creator) become polygon ids.
+  // Map and Set orders are kept, so a round trip reproduces the graph exactly.
+  toJSON() {
+    const polygons = [...this.polygons.values()].map((p) => ({ id: p.id, verts: p.verts.slice() }));
+    const records = [];
+    for (const p of this.polygons.values()) {
+      if (!p.record) continue;
+      const { parents, ...rest } = p.record;
+      records.push({
+        ...rest,
+        siteVerts: rest.siteVerts.slice(),
+        midVerts: rest.midVerts.slice(),
+        apexVerts: rest.apexVerts.slice(),
+        triangleIds: rest.triangleIds.slice(),
+        parents: [...parents].map((r) => r.polygonId),
+      });
+    }
+    return {
+      vertices: [...this.vertices.keys()],
+      polygons,
+      triangles: [...this.triangles.values()].map((t) => ({ id: t.id, verts: t.verts.slice() })),
+      boundary: this.boundary.slice(),
+      facesAt: [...this._facesAt].map(([v, keys]) => [v, [...keys]]),
+      records,
+      createdBy: [...this._createdBy].map(([v, r]) => [v, r.polygonId]),
+    };
+  }
+
+  // Replace this graph's contents with a toJSON() snapshot.
+  loadJSON(data) {
+    this.reset();
+    const records = new Map(data.records.map((r) => [r.polygonId, { ...r, parents: new Set() }]));
+    for (const d of data.records) {
+      for (const pid of d.parents) records.get(d.polygonId).parents.add(records.get(pid));
+    }
+    let maxId = 0;
+    for (const v of data.vertices) {
+      this.vertices.set(v, { id: v });
+      maxId = Math.max(maxId, v);
+    }
+    for (const p of data.polygons) {
+      this.polygons.set(p.id, { id: p.id, verts: p.verts.slice(), record: records.get(p.id) || null });
+      maxId = Math.max(maxId, p.id);
+    }
+    for (const t of data.triangles) {
+      this.triangles.set(t.id, { id: t.id, verts: t.verts.slice() });
+      maxId = Math.max(maxId, t.id);
+    }
+    this.boundary = data.boundary.slice();
+    for (const [v, keys] of data.facesAt) {
+      this._facesAt.set(v, new Set(keys));
+      this._faceCountAt.set(v, keys.length);
+    }
+    for (const [v, pid] of data.createdBy) this._createdBy.set(v, records.get(pid));
+    // ids are never reused: later placements must not collide with loaded ones
+    if (nextId <= maxId) nextId = maxId + 1;
+  }
+
   // ---- internal bookkeeping -------------------------------------------------
 
   _addVertex(createdBy) {

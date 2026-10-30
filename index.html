@@ -4,201 +4,54 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>Weave Graph Designer</title>
-<style>
-  html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    background: #14161a;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    touch-action: none;
-  }
-  #canvas-container {
-    position: fixed;
-    inset: 0;
-  }
-  canvas {
-    display: block;
-  }
-
-  #mode-chooser {
-    position: fixed;
-    top: 16px;
-    left: 16px;
-    right: 16px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    z-index: 10;
-    pointer-events: none;
-  }
-  #mode-chooser .group {
-    display: flex;
-    gap: 6px;
-    background: rgba(24, 26, 32, 0.72);
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    padding: 6px;
-    pointer-events: auto;
-  }
-  .mode-btn {
-    appearance: none;
-    border: none;
-    outline: none;
-    background: transparent;
-    color: #cfd3da;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 8px 12px;
-    border-radius: 7px;
-    cursor: pointer;
-    transition: background 0.12s ease, color 0.12s ease;
-    white-space: nowrap;
-  }
-  .mode-btn:hover {
-    background: rgba(255,255,255,0.08);
-    color: #fff;
-  }
-  .mode-btn.active {
-    background: #4c8dff;
-    color: #fff;
-  }
-  .mode-btn.delete-btn.active {
-    background: #ff5c5c;
-  }
-  .mode-btn .n {
-    opacity: 0.65;
-    font-size: 10px;
-    margin-left: 3px;
-  }
-
-  #hint {
-    position: fixed;
-    bottom: 16px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 10;
-    background: rgba(24, 26, 32, 0.72);
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255,255,255,0.08);
-    color: #9aa0ab;
-    font-size: 12px;
-    padding: 8px 14px;
-    border-radius: 8px;
-    pointer-events: none;
-    max-width: 90vw;
-    text-align: center;
-  }
-
-  #tuning-panel {
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    z-index: 10;
-    background: rgba(24, 26, 32, 0.82);
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    padding: 10px 12px;
-    width: 220px;
-    color: #cfd3da;
-    font-size: 12px;
-  }
-  #tuning-panel.collapsed {
-    width: auto;
-  }
-  #tuning-panel.collapsed .tuning-body {
-    display: none;
-  }
-  #tuning-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    cursor: pointer;
-    user-select: none;
-    font-weight: 600;
-    color: #e6e8ec;
-  }
-  #tuning-header .chev {
-    transition: transform 0.15s ease;
-    opacity: 0.6;
-  }
-  #tuning-panel.collapsed #tuning-header .chev {
-    transform: rotate(-90deg);
-  }
-  .tuning-body {
-    margin-top: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .tuning-row label {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 3px;
-  }
-  .tuning-row .val {
-    color: #8fa3c8;
-    font-variant-numeric: tabular-nums;
-  }
-  .tuning-row input[type="range"] {
-    width: 100%;
-    accent-color: #4c8dff;
-  }
-  .tuning-row .desc {
-    display: block;
-    font-size: 10.5px;
-    color: #767c88;
-    margin-top: 2px;
-    line-height: 1.3;
-  }
-  #tuning-reset {
-    margin-top: 4px;
-    appearance: none;
-    border: none;
-    background: rgba(255,255,255,0.08);
-    color: #cfd3da;
-    border-radius: 6px;
-    padding: 6px 10px;
-    font-size: 11.5px;
-    cursor: pointer;
-    align-self: flex-start;
-  }
-  #tuning-reset:hover {
-    background: rgba(255,255,255,0.16);
-    color: #fff;
-  }
-</style>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="canvas-container"></div>
+<design-app
+  app-title="Triaxial"
+  file-extension=".weave.json"
+  file-description="Weave graph"
+  file-mime="application/json"
+  autosave-key="triaxial.weave"
+  theme="dark"
+>
+  <!-- three strands woven around a triangle -->
+  <svg slot="icon" viewBox="0 0 24 24" width="20" height="20" fill="none"
+       stroke="currentColor" stroke-width="1.8"
+       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M3 17h18"/>
+    <path d="M6.5 21 15 4"/>
+    <path d="M17.5 21 9 4"/>
+  </svg>
 
-  <div id="mode-chooser">
-    <div class="group" id="polygon-group">
-      <button class="mode-btn" data-n="3">Triangle<span class="n">3</span></button>
-      <button class="mode-btn" data-n="4">Square<span class="n">4</span></button>
-      <button class="mode-btn" data-n="5">Pentagon<span class="n">5</span></button>
-      <button class="mode-btn active" data-n="6">Hexagon<span class="n">6</span></button>
-      <button class="mode-btn" data-n="7">Heptagon<span class="n">7</span></button>
-    </div>
-    <div class="group">
-      <button class="mode-btn delete-btn" id="delete-mode">Delete</button>
-    </div>
-    <div class="group">
-      <button class="mode-btn" id="flip-weave">Flip over/under</button>
+  <div id="viewport">
+    <div id="mode-chooser">
+      <div class="group" id="polygon-group">
+        <button class="mode-btn" data-n="3">Triangle<span class="n">3</span></button>
+        <button class="mode-btn" data-n="4">Square<span class="n">4</span></button>
+        <button class="mode-btn" data-n="5">Pentagon<span class="n">5</span></button>
+        <button class="mode-btn active" data-n="6">Hexagon<span class="n">6</span></button>
+        <button class="mode-btn" data-n="7">Heptagon<span class="n">7</span></button>
+      </div>
+      <div class="group">
+        <button class="mode-btn delete-btn" id="delete-mode">Delete</button>
+      </div>
     </div>
   </div>
 
-  <div id="hint">Click a highlighted (concave) vertex to place a cell. Drag to rotate, scroll to zoom.</div>
+  <div slot="info" class="panel-content">
+    <h3>Weave graph designer</h3>
+    <p id="hint">Click a highlighted vertex to place a hexagon.</p>
+    <p>
+      Pick a polygon in the toolbar, then click a highlighted vertex on the
+      boundary to place it there. In Delete mode, click a boundary vertex to
+      remove its cell; only cells with nothing built on them can be removed.
+    </p>
+    <p>Drag to rotate, scroll to zoom, right-drag to pan.</p>
+  </div>
 
-  <div id="tuning-panel" class="collapsed">
-    <div id="tuning-header">
-      <span>Solver Tuning</span>
-      <span class="chev">▾</span>
-    </div>
+  <div slot="settings" class="panel-content">
+    <h3>Solver tuning</h3>
     <div class="tuning-body">
       <div class="tuning-row">
         <label>
@@ -291,6 +144,7 @@
       <button id="tuning-reset">Reset to defaults</button>
     </div>
   </div>
+</design-app>
 
   <script type="importmap">
   {
@@ -300,6 +154,7 @@
     }
   }
   </script>
+  <script type="module" src="https://vorth.github.io/design-app/module/index.js"></script>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

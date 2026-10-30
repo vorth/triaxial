@@ -7,6 +7,22 @@ Open `index.html` directly or serve the directory with any static file server.
 Run tests with `npm test` (Node's built-in test runner, no dependencies) — see
 `weaveGraph.test.js`. Run it after any change to `weaveGraph.js` or `physics.js`.
 
+## App shell (design-app)
+
+`index.html` wraps the app in the `<design-app>` web component
+(https://github.com/vorth/design-app), loaded by absolute URL from GitHub
+Pages (unpinned). It supplies the nav bar, menu, file New/Open/Save
+(`.weave.json`), undo/redo and autosave (key `triaxial.weave`); the canvas
+and toolbar sit in its default slot, help in `slot="info"`, solver tuning in
+`slot="settings"` (tuning stays in its own localStorage, not the document).
+
+Document = `{ version: 1, graph: WeaveGraph.toJSON(), sigma, positions }`,
+positions being every graph vertex's `crossingPosition`. Every edit goes
+through `applyEdit` in `main.js`: undo/redo restore whole-document snapshots
+rather than calling `deleteAt`. A restore carries surviving strips over
+(`reconcileStripState`) and seeds only the vertices the current strips lack;
+opening a file or a sigma change rebuilds from scratch.
+
 ## Mesh topology (weaveGraph.js)
 
 A weave graph is a mesh of alternating "face polygons", polygons with three or more sides,
