@@ -27,6 +27,29 @@ container.appendChild(renderer.domElement);
 
 scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 
+// ---------------------------------------------------------------------------
+// On-demand rendering. Frames run only while something is changing: the
+// weave is still relaxing, the camera is moving (including trackball
+// momentum after release), or the view needs redrawing after an edit.
+// ---------------------------------------------------------------------------
+
+const SETTLE_FRAMES = 30; // consecutive quiet frames before physics pauses
+let rafId = 0;
+let settled = false;
+let quietFrames = 0;
+let geometryDirty = true; // ribbons/targets need rewriting from the strip state
+
+function wake() {
+  if (!rafId) rafId = requestAnimationFrame(frame);
+}
+
+// Resume physics after anything that can move the weave.
+function unsettle() {
+  settled = false;
+  quietFrames = 0;
+  wake();
+}
+
 const controls = new TrackballControls(camera, renderer.domElement);
 controls.rotateSpeed = 3.0;
 controls.zoomSpeed = 1.2;
@@ -34,6 +57,13 @@ controls.panSpeed = 0.8;
 controls.noPan = false;
 controls.staticMoving = false;
 controls.dynamicDampingFactor = 0.15;
+// TrackballControls only advances inside update(), and reports 'change'
+// only when the camera actually moved, so its momentum keeps the loop
+// awake until it decays. Input events wake the loop to start a gesture.
+controls.addEventListener("change", wake);
+for (const type of ["pointerdown", "wheel"]) renderer.domElement.addEventListener(type, wake);
+renderer.domElement.addEventListener("pointermove", (e) => e.buttons && wake());
+window.addEventListener("keydown", wake);
 
 // The canvas fills the viewport below <design-app>'s nav bar, not the window.
 function resize() {
@@ -44,6 +74,7 @@ function resize() {
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   controls.handleResize();
+  wake();
 }
 new ResizeObserver(resize).observe(container);
 resize();
@@ -126,6 +157,8 @@ function rebuildStrips(seeded, fromScratch = false, sigma) {
   if (weave) disposeWeave(weave);
   weave = createWeave(stripModel, stripState, solverParams, stripParams);
   rebuildRibbonBuffers();
+  geometryDirty = true;
+  unsettle();
 }
 
 // Ribbon buffers depend on node counts, which change only on edits.
@@ -244,6 +277,8 @@ function rebuildTargets() {
     targetsGroup.add(mesh);
     targetMeshes.set(v, mesh);
   }
+  geometryDirty = true;
+  wake();
 }
 rebuildTargets();
 
@@ -388,6 +423,7 @@ const sliders = [
   ["curlStiffness", solverParams, "curlStiffness", DEFAULT_RAPIER_PARAMS, 2],
   ["twistStiffness", solverParams, "twistStiffness", DEFAULT_RAPIER_PARAMS, 2],
   ["damping", solverParams, "damping", DEFAULT_RAPIER_PARAMS, 2],
+  ["settleLog10", solverParams, "settleLog10", DEFAULT_RAPIER_PARAMS, 1],
   ["strip-width", stripParams, "width", DEFAULT_STRIP_PARAMS, 2],
   ["strip-thickness", stripParams, "thickness", DEFAULT_STRIP_PARAMS, 2],
 ];
@@ -414,6 +450,8 @@ for (const slider of sliders) {
     showSlider(slider);
     saveParams();
     setWeaveParams(weave, solverParams);
+    geometryDirty = true;
+    unsettle();
   });
 }
 
@@ -425,6 +463,8 @@ tuningReset.addEventListener("click", () => {
   }
   saveParams();
   setWeaveParams(weave, solverParams);
+  geometryDirty = true;
+  unsettle();
 });
 
 // ---------------------------------------------------------------------------
@@ -483,13 +523,26 @@ app.addEventListener("app-restore", (event) => {
 // Main loop
 // ---------------------------------------------------------------------------
 
-function animate() {
-  requestAnimationFrame(animate);
+const physicsStatus = document.getElementById("physics-status");
 
-  stepWeave(weave, solverParams);
+function frame() {
+  rafId = 0;
 
-  updateRenderGeometry();
-  controls.update();
+  if (!settled) {
+    const moved = stepWeave(weave, solverParams);
+    quietFrames = moved < 10 ** solverParams.settleLog10 ? quietFrames + 1 : 0;
+    settled = quietFrames >= SETTLE_FRAMES;
+    geometryDirty = true;
+  }
+  physicsStatus.textContent = settled ? "Physics: paused (settled)." : "Physics: running.";
+
+  if (geometryDirty) {
+    updateRenderGeometry();
+    geometryDirty = false;
+  }
+  controls.update(); // a 'change' here calls wake() for the next frame
   renderer.render(scene, camera);
+
+  if (!settled) wake();
 }
-animate();
+wake();

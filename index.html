@@ -95,6 +95,14 @@
       </div>
       <div class="tuning-row">
         <label>
+          <span>Settle Threshold (log&#8321;&#8320;)</span>
+          <span class="val" data-val="settleLog10"></span>
+        </label>
+        <input type="range" id="settleLog10" min="-6" max="-2" step="0.1" />
+        <span class="desc">Physics pauses (saving battery) once no node moves more than 10^this per frame; any edit or setting change resumes it. Lower = keeps relaxing longer. <span id="physics-status"></span></span>
+      </div>
+      <div class="tuning-row">
+        <label>
           <span>Strip Width</span>
           <span class="val" data-val="strip-width"></span>
         </label>

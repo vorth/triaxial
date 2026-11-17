@@ -36,6 +36,8 @@ export const DEFAULT_RAPIER_PARAMS = {
   twistStiffness: 1, // 0..1, log-mapped motor stiffness around the plate's Y
   damping: 0.1, // fraction of velocity removed per step; 0.5 and up settles
   // too slowly to see a pentagon dome within seconds
+  settleLog10: -4, // the weave counts as settled (and stops stepping) once no
+  // node moves more than 10^settleLog10 per frame; read by main.js, not Rapier
 };
 
 const DT = 1 / 60;
@@ -259,9 +261,12 @@ export function setWeaveParams(weave, params) {
 }
 
 // Advance one frame and write plate poses back into the strip state.
+// Returns how far the fastest node moved, so the caller can tell when the
+// weave has settled. (Plate velocities are no use for that: they keep a
+// floor of solver jitter long after the shape has stopped changing.)
 export function stepWeave(weave, params) {
   for (let k = 0; k < params.stepsPerFrame; k++) weave.world.step();
-  readBack(weave);
+  return readBack(weave);
 }
 
 export function disposeWeave(weave) {
@@ -271,9 +276,11 @@ export function disposeWeave(weave) {
 // Node positions and width vectors from plate poses. A node shared by two
 // plates is the midpoint of their joined ends (they agree up to the joint
 // error); an open strip's end nodes are its end plates' outer ends.
+// Returns the largest distance any node moved.
 function readBack(weave) {
   const { state, plates } = weave;
   const pos = state.position;
+  let moved = 0;
   state.strips.forEach((st, i) => {
     const bodies = plates[i];
     const half = st.h / 2;
@@ -295,10 +302,13 @@ function readBack(weave) {
       let p;
       if (before && after) p = [(before.hi[0] + after.lo[0]) / 2, (before.hi[1] + after.lo[1]) / 2, (before.hi[2] + after.lo[2]) / 2];
       else p = before ? before.hi : after.lo;
-      pos.set(p, 3 * (st.nodeOffset + k));
-      state.width.set((after || before).X, 3 * (st.nodeOffset + k));
+      const j = 3 * (st.nodeOffset + k);
+      moved = Math.max(moved, Math.hypot(p[0] - pos[j], p[1] - pos[j + 1], p[2] - pos[j + 2]));
+      pos.set(p, j);
+      state.width.set((after || before).X, j);
     }
   });
   state.prev.set(pos);
   updateDirectors(state);
+  return moved;
 }

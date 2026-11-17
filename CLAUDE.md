@@ -185,6 +185,14 @@ produced a pentagon dome.
   mesh that is still relaxing). The pentagon mesh goes out of plane
   (z −0.38..0.51) with spans held at 0.985–1.0.
 
+**Rendering is on demand** (`frame`/`wake` in `main.js`): physics steps
+until no node moves more than `10^settleLog10` (default 1e-4) for 30
+frames, then pauses until `unsettle()`; after that, frames run only for
+camera motion (TrackballControls `change`, which also carries its
+momentum) or `wake()`. Plate velocities can't serve as the settle test:
+they keep a ~0.04 floor of solver jitter. Anything new that changes the
+view must call `wake()`; anything that can move the weave, `unsettle()`.
+
 **Do not assume orientability when reasoning about face normals here** —
 the user flagged early that the eventual mesh editor should support
 non-orientable constructions (e.g. a Klein-bottle-style embedding), so two
